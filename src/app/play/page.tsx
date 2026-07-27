@@ -81,6 +81,9 @@ function PlayPageClient() {
   // 跳过检查的时间间隔控制
   const lastSkipCheckRef = useRef(0);
 
+  // 卡顿恢复节流，避免频繁 seek
+  const lastStallRecoveryRef = useRef(0);
+
   // 去广告开关（从 localStorage 继承，默认 true）
   const [blockAdEnabled, setBlockAdEnabled] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
@@ -471,21 +474,58 @@ function PlayPageClient() {
     }
   };
 
-  // 去广告相关函数
+  // 去广告相关函数：移除插入点标记，并尽量丢掉明显的短广告分片
   function filterAdsFromM3U8(m3u8Content: string): string {
     if (!m3u8Content) return '';
 
-    // 按行分割M3U8内容
     const lines = m3u8Content.split('\n');
-    const filteredLines = [];
+    const durations: number[] = [];
+    for (const line of lines) {
+      if (line.startsWith('#EXTINF:')) {
+        const duration = parseFloat(line.slice(8));
+        if (!Number.isNaN(duration)) durations.push(duration);
+      }
+    }
+
+    const sorted = [...durations].sort((a, b) => a - b);
+    const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 10;
+    // 相对正常分片明显偏短的片段，更可能是插播广告
+    const adDurationThreshold = Math.min(3, median * 0.35);
+
+    const filteredLines: string[] = [];
+    let skipNextUri = false;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
 
-      // 只过滤#EXT-X-DISCONTINUITY标识
-      if (!line.includes('#EXT-X-DISCONTINUITY')) {
-        filteredLines.push(line);
+      // 去掉不连续标记，避免广告插入点打断播放
+      if (line.includes('#EXT-X-DISCONTINUITY')) {
+        continue;
       }
+
+      if (line.startsWith('#EXTINF:')) {
+        const duration = parseFloat(line.slice(8));
+        if (
+          !Number.isNaN(duration) &&
+          median >= 5 &&
+          duration > 0 &&
+          duration < adDurationThreshold
+        ) {
+          skipNextUri = true;
+          continue;
+        }
+        filteredLines.push(line);
+        continue;
+      }
+
+      // 跳过紧随被过滤 EXTINF 之后的分片 URI
+      if (skipNextUri && line.trim() && !line.startsWith('#')) {
+        skipNextUri = false;
+        continue;
+      }
+
+      skipNextUri = false;
+      filteredLines.push(line);
     }
 
     return filteredLines.join('\n');
@@ -1093,12 +1133,6 @@ function PlayPageClient() {
       });
 
       lastSaveTimeRef.current = Date.now();
-      console.log('播放进度已保存:', {
-        title: videoTitleRef.current,
-        episode: currentEpisodeIndexRef.current + 1,
-        year: detailRef.current?.year,
-        progress: `${Math.floor(currentTime)}/${Math.floor(duration)}`,
-      });
     } catch (err) {
       console.error('保存播放进度失败:', err);
     }
@@ -1254,6 +1288,10 @@ function PlayPageClient() {
 
     // WebKit浏览器或首次创建：销毁之前的播放器实例并创建新的
     if (artPlayerRef.current) {
+      if (saveIntervalRef.current) {
+        clearInterval(saveIntervalRef.current);
+        saveIntervalRef.current = null;
+      }
       if (artPlayerRef.current.video && artPlayerRef.current.video.hls) {
         artPlayerRef.current.video.hls.destroy();
       }
@@ -1344,14 +1382,22 @@ function PlayPageClient() {
               video.hls.destroy();
             }
             const hls = new Hls({
-              debug: false, // 关闭日志
+              debug: false,
               enableWorker: true, // WebWorker 解码，降低主线程压力
-              lowLatencyMode: true, // 开启低延迟 LL-HLS
+              // 点播场景关闭低延迟模式，优先流畅与缓冲稳定性
+              lowLatencyMode: false,
 
-              /* 缓冲/内存相关 */
-              maxBufferLength: 30, // 前向缓冲最大 30s，过大容易导致高延迟
-              backBufferLength: 30, // 仅保留 30s 已播放内容，避免内存占用
-              maxBufferSize: 60 * 1000 * 1000, // 约 60MB，超出后触发清理
+              /* 缓冲策略：更长前向缓冲，减少弱网卡顿 */
+              maxBufferLength: 60,
+              maxMaxBufferLength: 120,
+              backBufferLength: 90,
+              maxBufferSize: 100 * 1000 * 1000, // 约 100MB
+              // 容忍去广告后可能留下的时间戳空洞
+              maxBufferHole: 1.5,
+              nudgeMaxRetry: 5,
+              startFragPrefetch: true,
+              // 按播放器尺寸限制清晰度，降低移动端解码压力
+              capLevelToPlayerSize: true,
 
               /* 自定义loader */
               loader: blockAdEnabledRef.current
@@ -1365,20 +1411,46 @@ function PlayPageClient() {
 
             ensureVideoSource(video, url);
 
-            hls.on(Hls.Events.ERROR, function (event: any, data: any) {
-              console.error('HLS Error:', event, data);
+            hls.on(Hls.Events.ERROR, function (_event: any, data: any) {
+              // 缓冲卡顿 / 跳过空洞：小幅前跳，避免卡死在坏分片
+              if (
+                data?.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR ||
+                data?.details === Hls.ErrorDetails.BUFFER_SEEK_OVER_HOLE
+              ) {
+                const now = Date.now();
+                if (now - lastStallRecoveryRef.current < 2000) return;
+                lastStallRecoveryRef.current = now;
+                try {
+                  const media = hls.media;
+                  if (
+                    media &&
+                    !media.seeking &&
+                    Number.isFinite(media.currentTime)
+                  ) {
+                    const duration = Number.isFinite(media.duration)
+                      ? media.duration
+                      : media.currentTime + 1.5;
+                    media.currentTime = Math.min(
+                      duration,
+                      media.currentTime + 1.5
+                    );
+                  }
+                } catch (err) {
+                  console.warn('尝试跳过卡顿分片失败:', err);
+                }
+                return;
+              }
+
               if (data.fatal) {
+                console.error('HLS Fatal Error:', data);
                 switch (data.type) {
                   case Hls.ErrorTypes.NETWORK_ERROR:
-                    console.log('网络错误，尝试恢复...');
                     hls.startLoad();
                     break;
                   case Hls.ErrorTypes.MEDIA_ERROR:
-                    console.log('媒体错误，尝试恢复...');
                     hls.recoverMediaError();
                     break;
                   default:
-                    console.log('无法恢复的错误');
                     hls.destroy();
                     break;
                 }
@@ -1613,20 +1685,19 @@ function PlayPageClient() {
         }
       });
 
-      artPlayerRef.current.on('video:timeupdate', () => {
-        const now = Date.now();
-        let interval = 5000;
-        if (process.env.NEXT_PUBLIC_STORAGE_TYPE === 'd1') {
-          interval = 10000;
-        }
-        if (process.env.NEXT_PUBLIC_STORAGE_TYPE === 'upstash') {
-          interval = 20000;
-        }
-        if (now - lastSaveTimeRef.current > interval) {
-          saveCurrentPlayProgress();
-          lastSaveTimeRef.current = now;
-        }
-      });
+      // 定时保存播放进度，降低主线程写入频率
+      if (saveIntervalRef.current) {
+        clearInterval(saveIntervalRef.current);
+      }
+      const saveIntervalMs =
+        process.env.NEXT_PUBLIC_STORAGE_TYPE === 'd1'
+          ? 10000
+          : process.env.NEXT_PUBLIC_STORAGE_TYPE === 'upstash'
+          ? 20000
+          : 15000;
+      saveIntervalRef.current = setInterval(() => {
+        saveCurrentPlayProgress();
+      }, saveIntervalMs);
 
       artPlayerRef.current.on('pause', () => {
         saveCurrentPlayProgress();

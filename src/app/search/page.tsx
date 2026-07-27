@@ -3,7 +3,7 @@
 
 import { ChevronUp, Search, X } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   addSearchHistory,
@@ -13,8 +13,10 @@ import {
   subscribeToDataUpdates,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
+import { getEpisodeCount } from '@/lib/utils';
 import { yellowWords } from '@/lib/yellow';
 
+import DoubanCardSkeleton from '@/components/DoubanCardSkeleton';
 import PageLayout from '@/components/PageLayout';
 import VideoCard from '@/components/VideoCard';
 
@@ -30,6 +32,7 @@ function SearchPageClient() {
   const [isLoading, setIsLoading] = useState(false);
   const [showResults, setShowResults] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // 获取默认聚合设置：只读取用户本地设置，默认为 true
   const getDefaultAggregate = () => {
@@ -50,10 +53,11 @@ function SearchPageClient() {
   const aggregatedResults = useMemo(() => {
     const map = new Map<string, SearchResult[]>();
     searchResults.forEach((item) => {
+      const episodeCount = getEpisodeCount(item);
       // 使用 title + year + type 作为键，year 必然存在，但依然兜底 'unknown'
       const key = `${item.title.replaceAll(' ', '')}-${
         item.year || 'unknown'
-      }-${item.episodes.length === 1 ? 'movie' : 'tv'}`;
+      }-${episodeCount === 1 ? 'movie' : 'tv'}`;
       const arr = map.get(key) || [];
       arr.push(item);
       map.set(key, arr);
@@ -90,7 +94,7 @@ function SearchPageClient() {
         }
       }
     });
-  }, [searchResults]);
+  }, [searchResults, searchQuery]);
 
   useEffect(() => {
     // 无搜索参数时聚焦搜索框
@@ -112,61 +116,51 @@ function SearchPageClient() {
       return document.body.scrollTop || 0;
     };
 
-    // 使用 requestAnimationFrame 持续检测滚动位置
-    let isRunning = false;
-    const checkScrollPosition = () => {
-      if (!isRunning) return;
-
-      const scrollTop = getScrollTop();
-      const shouldShow = scrollTop > 300;
-      setShowBackToTop(shouldShow);
-
-      requestAnimationFrame(checkScrollPosition);
-    };
-
-    // 启动持续检测
-    isRunning = true;
-    checkScrollPosition();
-
-    // 监听 body 元素的滚动事件
+    // 监听 body 元素的滚动事件（避免 rAF 常驻循环耗电）
     const handleScroll = () => {
       const scrollTop = getScrollTop();
       setShowBackToTop(scrollTop > 300);
     };
 
     document.body.addEventListener('scroll', handleScroll, { passive: true });
+    handleScroll();
 
     return () => {
       unsubscribe();
-      isRunning = false; // 停止 requestAnimationFrame 循环
-
-      // 移除 body 滚动事件监听器
       document.body.removeEventListener('scroll', handleScroll);
+      abortControllerRef.current?.abort();
     };
   }, []);
 
   useEffect(() => {
-    // 当搜索参数变化时更新搜索状态
+    // 当搜索参数变化时更新搜索状态（唯一请求入口，避免与提交时双发）
     const query = searchParams.get('q');
     if (query) {
       setSearchQuery(query);
+      setIsLoading(true);
+      setShowResults(true);
       fetchSearchResults(query);
-
-      // 保存到搜索历史 (事件监听会自动更新界面)
       addSearchHistory(query);
     } else {
       setShowResults(false);
+      setIsLoading(false);
+      setSearchResults([]);
     }
   }, [searchParams]);
 
   const fetchSearchResults = async (query: string) => {
+    abortControllerRef.current?.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     try {
       setIsLoading(true);
       const response = await fetch(
-        `/api/search?q=${encodeURIComponent(query.trim())}`
+        `/api/search?q=${encodeURIComponent(query.trim())}&lite=1`,
+        { signal: controller.signal }
       );
       const data = await response.json();
-      let results = data.results;
+      let results = data.results || [];
       if (
         typeof window !== 'undefined' &&
         !(window as any).RUNTIME_CONFIG?.DISABLE_YELLOW_FILTER
@@ -205,9 +199,12 @@ function SearchPageClient() {
       );
       setShowResults(true);
     } catch (error) {
+      if ((error as Error)?.name === 'AbortError') return;
       setSearchResults([]);
     } finally {
-      setIsLoading(false);
+      if (!controller.signal.aborted) {
+        setIsLoading(false);
+      }
     }
   };
 
@@ -216,17 +213,12 @@ function SearchPageClient() {
     const trimmed = searchQuery.trim().replace(/\s+/g, ' ');
     if (!trimmed) return;
 
-    // 回显搜索框
+    // 回显搜索框；请求仅由 searchParams effect 触发
     setSearchQuery(trimmed);
     setIsLoading(true);
     setShowResults(true);
 
     router.push(`/search?q=${encodeURIComponent(trimmed)}`);
-    // 直接发请求
-    fetchSearchResults(trimmed);
-
-    // 保存到搜索历史 (事件监听会自动更新界面)
-    addSearchHistory(trimmed);
   };
 
   // 返回顶部功能
@@ -266,9 +258,18 @@ function SearchPageClient() {
         {/* 搜索结果或搜索历史 */}
         <div className='max-w-[95%] mx-auto mt-12 overflow-visible'>
           {isLoading ? (
-            <div className='flex justify-center items-center h-40'>
-              <div className='animate-spin rounded-full h-8 w-8 border-b-2 border-green-500'></div>
-            </div>
+            <section className='mb-12'>
+              <div className='mb-8 flex items-center justify-between'>
+                <h2 className='text-xl font-bold text-gray-800 dark:text-gray-200'>
+                  搜索中...
+                </h2>
+              </div>
+              <div className='justify-start grid grid-cols-3 gap-x-2 gap-y-14 sm:gap-y-20 px-0 sm:px-2 sm:grid-cols-[repeat(auto-fill,_minmax(11rem,_1fr))] sm:gap-x-8'>
+                {Array.from({ length: 12 }).map((_, index) => (
+                  <DoubanCardSkeleton key={index} />
+                ))}
+              </div>
+            </section>
           ) : showResults ? (
             <section className='mb-12'>
               {/* 标题 + 聚合开关 */}
@@ -315,30 +316,33 @@ function SearchPageClient() {
                         </div>
                       );
                     })
-                  : searchResults.map((item) => (
-                      <div
-                        key={`all-${item.source}-${item.id}`}
-                        className='w-full'
-                      >
-                        <VideoCard
-                          id={item.id}
-                          title={item.title + ' ' + item.type_name}
-                          poster={item.poster}
-                          episodes={item.episodes.length}
-                          source={item.source}
-                          source_name={item.source_name}
-                          douban_id={item.douban_id?.toString()}
-                          query={
-                            searchQuery.trim() !== item.title
-                              ? searchQuery.trim()
-                              : ''
-                          }
-                          year={item.year}
-                          from='search'
-                          type={item.episodes.length > 1 ? 'tv' : 'movie'}
-                        />
-                      </div>
-                    ))}
+                  : searchResults.map((item) => {
+                      const episodeCount = getEpisodeCount(item);
+                      return (
+                        <div
+                          key={`all-${item.source}-${item.id}`}
+                          className='w-full'
+                        >
+                          <VideoCard
+                            id={item.id}
+                            title={item.title + ' ' + item.type_name}
+                            poster={item.poster}
+                            episodes={episodeCount}
+                            source={item.source}
+                            source_name={item.source_name}
+                            douban_id={item.douban_id?.toString()}
+                            query={
+                              searchQuery.trim() !== item.title
+                                ? searchQuery.trim()
+                                : ''
+                            }
+                            year={item.year}
+                            from='search'
+                            type={episodeCount > 1 ? 'tv' : 'movie'}
+                          />
+                        </div>
+                      );
+                    })}
                 {searchResults.length === 0 && (
                   <div className='col-span-full text-center text-gray-500 py-8 dark:text-gray-400'>
                     未找到相关结果
@@ -376,7 +380,7 @@ function SearchPageClient() {
                     >
                       {item}
                     </button>
-                    {/* 删除按钮 */}
+                    {/* 删除按钮：触摸设备始终可见 */}
                     <button
                       aria-label='删除搜索历史'
                       onClick={(e) => {
@@ -384,7 +388,7 @@ function SearchPageClient() {
                         e.preventDefault();
                         deleteSearchHistory(item); // 事件监听会自动更新界面
                       }}
-                      className='absolute -top-1 -right-1 w-4 h-4 opacity-0 group-hover:opacity-100 bg-gray-400 hover:bg-red-500 text-white rounded-full flex items-center justify-center text-[10px] transition-colors'
+                      className='absolute -top-1 -right-1 w-4 h-4 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 bg-gray-400 hover:bg-red-500 text-white rounded-full flex items-center justify-center text-[10px] transition-colors'
                     >
                       <X className='w-3 h-3' />
                     </button>

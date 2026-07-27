@@ -15,6 +15,40 @@
 
 :root {
   --foreground-rgb: 255, 255, 255;
+  --skeleton-color: #f0f0f0;
+  --skeleton-highlight: #e0e0e0;
+}
+
+.dark {
+  --skeleton-color: #2d2d2d;
+  --skeleton-highlight: #3d3d3d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --skeleton-color: #2d2d2d;
+    --skeleton-highlight: #3d3d3d;
+  }
+}
+
+@keyframes shine {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.image-placeholder {
+  background: linear-gradient(
+    90deg,
+    var(--skeleton-color) 25%,
+    var(--skeleton-highlight) 50%,
+    var(--skeleton-color) 75%
+  );
+  background-size: 200% 100%;
+  animation: shine 1.5s infinite;
 }
 
 html,

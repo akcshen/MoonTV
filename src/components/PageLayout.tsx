@@ -38,13 +38,8 @@ const PageLayout = ({ children, activePath = '/' }: PageLayoutProps) => {
             <UserMenu />
           </div>
 
-          {/* 主内容 */}
-          <main
-            className='flex-1 md:min-h-0 mb-14 md:mb-0'
-            style={{
-              paddingBottom: 'calc(3.5rem + env(safe-area-inset-bottom))',
-            }}
-          >
+          {/* 主内容：移动端仅用 mb 为底栏留白，避免与 safe-area 双重叠加 */}
+          <main className='flex-1 md:min-h-0 mb-[calc(3.5rem+env(safe-area-inset-bottom))] md:mb-0'>
             {children}
           </main>
         </div>

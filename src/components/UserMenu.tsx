@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
+import { invalidateImageProxyCache } from '@/lib/utils';
 import { checkForUpdates, CURRENT_VERSION, UpdateStatus } from '@/lib/version';
 
 interface AuthInfo {
@@ -236,6 +237,7 @@ export const UserMenu: React.FC = () => {
     setImageProxyUrl(value);
     if (typeof window !== 'undefined') {
       localStorage.setItem('imageProxyUrl', value);
+      invalidateImageProxyCache();
     }
   };
 
@@ -250,6 +252,7 @@ export const UserMenu: React.FC = () => {
     setEnableImageProxy(value);
     if (typeof window !== 'undefined') {
       localStorage.setItem('enableImageProxy', JSON.stringify(value));
+      invalidateImageProxyCache();
     }
   };
 
@@ -285,6 +288,7 @@ export const UserMenu: React.FC = () => {
         JSON.stringify(!!defaultImageProxy)
       );
       localStorage.setItem('imageProxyUrl', defaultImageProxy);
+      invalidateImageProxyCache();
     }
   };
 

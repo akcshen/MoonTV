@@ -87,6 +87,8 @@ export interface SearchResult {
   title: string;
   poster: string;
   episodes: string[];
+  /** 精简搜索时返回的集数，避免下发完整播放地址列表 */
+  episode_count?: number;
   source: string;
   source_name: string;
   class?: string;

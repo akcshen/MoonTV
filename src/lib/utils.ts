@@ -1,7 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any,no-console */
 
-import Hls from 'hls.js';
-
 /**
  * 获取图片代理 URL 设置
  */
@@ -28,13 +26,29 @@ export function getImageProxyUrl(): string | null {
     : null;
 }
 
+/** 缓存图片代理前缀，避免每个卡片反复读 localStorage */
+let cachedImageProxyUrl: string | null | undefined;
+
+function getCachedImageProxyUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  if (cachedImageProxyUrl === undefined) {
+    cachedImageProxyUrl = getImageProxyUrl();
+  }
+  return cachedImageProxyUrl;
+}
+
+/** 图片代理设置变更时调用，清空缓存 */
+export function invalidateImageProxyCache(): void {
+  cachedImageProxyUrl = undefined;
+}
+
 /**
  * 处理图片 URL，如果设置了图片代理则使用代理
  */
 export function processImageUrl(originalUrl: string): string {
   if (!originalUrl) return originalUrl;
 
-  const proxyUrl = getImageProxyUrl();
+  const proxyUrl = getCachedImageProxyUrl();
   if (!proxyUrl) return originalUrl;
 
   return `${proxyUrl}${encodeURIComponent(originalUrl)}`;
@@ -90,15 +104,29 @@ export function cleanHtmlTags(text: string): string {
 }
 
 /**
- * 从m3u8地址获取视频质量等级和网络信息
- * @param m3u8Url m3u8播放列表的URL
- * @returns Promise<{quality: string, loadSpeed: string, pingTime: number}> 视频质量等级和网络信息
+ * 获取剧集数量（兼容精简搜索结果）
+ */
+export function getEpisodeCount(item: {
+  episodes?: string[];
+  episode_count?: number;
+}): number {
+  if (typeof item.episode_count === 'number' && item.episode_count >= 0) {
+    return item.episode_count;
+  }
+  return item.episodes?.length ?? 0;
+}
+
+/**
+ * 从 m3u8 地址获取视频质量等级和网络信息。
+ * 动态加载 hls.js，避免列表页打包进播放器依赖。
  */
 export async function getVideoResolutionFromM3u8(m3u8Url: string): Promise<{
   quality: string; // 如720p、1080p等
   loadSpeed: string; // 自动转换为KB/s或MB/s
   pingTime: number; // 网络延迟（毫秒）
 }> {
+  const Hls = (await import('hls.js')).default;
+
   try {
     // 直接使用m3u8 URL作为视频源，避免CORS问题
     return new Promise((resolve, reject) => {

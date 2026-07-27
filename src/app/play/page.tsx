@@ -2,8 +2,6 @@
 
 'use client';
 
-import Artplayer from 'artplayer';
-import Hls from 'hls.js';
 import { Heart } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useRef, useState } from 'react';
@@ -22,7 +20,11 @@ import {
   subscribeToDataUpdates,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
-import { getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
+import {
+  getEpisodeCount,
+  getVideoResolutionFromM3u8,
+  processImageUrl,
+} from '@/lib/utils';
 
 import EpisodeSelector from '@/components/EpisodeSelector';
 import PageLayout from '@/components/PageLayout';
@@ -33,6 +35,10 @@ declare global {
     hls?: any;
   }
 }
+
+// ArtPlayer / HLS 动态加载，避免进入播放页前就打包进主包
+type ArtplayerConstructor = any;
+type HlsConstructor = any;
 
 function PlayPageClient() {
   const router = useRouter();
@@ -193,26 +199,54 @@ function PlayPageClient() {
 
   const artPlayerRef = useRef<any>(null);
   const artRef = useRef<HTMLDivElement | null>(null);
+  const [Artplayer, setArtplayer] = useState<ArtplayerConstructor | null>(null);
+  const [Hls, setHls] = useState<HlsConstructor | null>(null);
+
+  // 动态加载播放器依赖
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [{ default: Art }, { default: HlsModule }] = await Promise.all([
+          import('artplayer'),
+          import('hls.js'),
+        ]);
+        if (!cancelled) {
+          setArtplayer(() => Art);
+          setHls(() => HlsModule);
+        }
+      } catch (err) {
+        console.error('加载播放器依赖失败:', err);
+        if (!cancelled) {
+          setError('播放器加载失败，请刷新重试');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // -----------------------------------------------------------------------------
   // 工具函数（Utils）
   // -----------------------------------------------------------------------------
 
-  // 播放源优选函数
+  // 播放源优选函数：限制测速数量，降低移动端压力
   const preferBestSource = async (
     sources: SearchResult[]
   ): Promise<SearchResult> => {
     if (sources.length === 1) return sources[0];
 
-    // 将播放源均分为两批，并发测速各批，避免一次性过多请求
-    const batchSize = Math.ceil(sources.length / 2);
+    // 最多测速前 6 个源，避免一次性创建过多 HLS 实例
+    const candidates = sources.slice(0, 6);
+    const batchSize = Math.min(3, candidates.length);
     const allResults: Array<{
       source: SearchResult;
       testResult: { quality: string; loadSpeed: string; pingTime: number };
     } | null> = [];
 
-    for (let start = 0; start < sources.length; start += batchSize) {
-      const batchSources = sources.slice(start, start + batchSize);
+    for (let start = 0; start < candidates.length; start += batchSize) {
+      const batchSources = candidates.slice(start, start + batchSize);
       const batchResults = await Promise.all(
         batchSources.map(async (source) => {
           try {
@@ -252,7 +286,8 @@ function PlayPageClient() {
       }
     >();
     allResults.forEach((result, index) => {
-      const source = sources[index];
+      const source = result?.source || candidates[index];
+      if (!source) return;
       const sourceKey = `${source.source}-${source.id}`;
 
       if (result) {
@@ -558,42 +593,14 @@ function PlayPageClient() {
     }
   };
 
-  class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
-    constructor(config: any) {
-      super(config);
-      const load = this.load.bind(this);
-      this.load = function (context: any, config: any, callbacks: any) {
-        // 拦截manifest和level请求
-        if (
-          (context as any).type === 'manifest' ||
-          (context as any).type === 'level'
-        ) {
-          const onSuccess = callbacks.onSuccess;
-          callbacks.onSuccess = function (
-            response: any,
-            stats: any,
-            context: any
-          ) {
-            // 如果是m3u8文件，处理内容以移除广告分段
-            if (response.data && typeof response.data === 'string') {
-              // 过滤掉广告段 - 实现更精确的广告过滤逻辑
-              response.data = filterAdsFromM3U8(response.data);
-            }
-            return onSuccess(response, stats, context, null);
-          };
-        }
-        // 执行原始load方法
-        load(context, config, callbacks);
-      };
-    }
-  }
+  // CustomHlsJsLoader 在播放器初始化时基于已加载的 Hls 动态创建
 
   // 当集数索引变化时自动更新视频地址
   useEffect(() => {
     updateVideoUrl(detail, currentEpisodeIndex);
   }, [detail, currentEpisodeIndex]);
 
-  // 进入页面时直接获取全部源信息
+  // 进入页面时初始化播放详情
   useEffect(() => {
     const fetchSourceDetail = async (
       source: string,
@@ -607,7 +614,12 @@ function PlayPageClient() {
           throw new Error('获取视频详情失败');
         }
         const detailData = (await detailResponse.json()) as SearchResult;
-        setAvailableSources([detailData]);
+        setAvailableSources((prev) => {
+          const exists = prev.some(
+            (item) => item.source === source && item.id === id
+          );
+          return exists ? prev : [detailData, ...prev];
+        });
         return [detailData];
       } catch (err) {
         console.error('获取视频详情失败:', err);
@@ -617,7 +629,7 @@ function PlayPageClient() {
       }
     };
     const fetchSourcesData = async (query: string): Promise<SearchResult[]> => {
-      // 根据搜索词获取全部源信息
+      // 根据搜索词获取全部源信息（播放页需要完整剧集地址，不使用 lite）
       try {
         const response = await fetch(
           `/api/search?q=${encodeURIComponent(query.trim())}`
@@ -636,8 +648,8 @@ function PlayPageClient() {
               ? result.year.toLowerCase() === videoYearRef.current.toLowerCase()
               : true) &&
             (searchType
-              ? (searchType === 'tv' && result.episodes.length > 1) ||
-                (searchType === 'movie' && result.episodes.length === 1)
+              ? (searchType === 'tv' && getEpisodeCount(result) > 1) ||
+                (searchType === 'movie' && getEpisodeCount(result) === 1)
               : true)
         );
         setAvailableSources(results);
@@ -665,46 +677,76 @@ function PlayPageClient() {
           : '🔍 正在搜索播放源...'
       );
 
-      let sourcesInfo = await fetchSourcesData(searchTitle || videoTitle);
-      if (
-        currentSource &&
-        currentId &&
-        !sourcesInfo.some(
-          (source) => source.source === currentSource && source.id === currentId
-        )
-      ) {
-        sourcesInfo = await fetchSourceDetail(currentSource, currentId);
-      }
-      if (sourcesInfo.length === 0) {
-        setError('未找到匹配结果');
-        setLoading(false);
-        return;
-      }
+      let sourcesInfo: SearchResult[] = [];
+      let detailData: SearchResult | null = null;
 
-      let detailData: SearchResult = sourcesInfo[0];
-      // 指定源和id且无需优选
+      // 快路径：已指定 source+id 且无需优选时，直接拉详情开播，后台再聚合其他源
       if (currentSource && currentId && !needPreferRef.current) {
-        const target = sourcesInfo.find(
-          (source) => source.source === currentSource && source.id === currentId
-        );
-        if (target) {
-          detailData = target;
-        } else {
+        sourcesInfo = await fetchSourceDetail(currentSource, currentId);
+        if (sourcesInfo.length === 0) {
           setError('未找到匹配结果');
           setLoading(false);
           return;
         }
+        detailData = sourcesInfo[0];
+
+        // 后台补充其他播放源，不阻塞首帧
+        const backgroundQuery = searchTitle || videoTitle;
+        if (backgroundQuery) {
+          fetchSourcesData(backgroundQuery).catch(() => {
+            /* ignore background errors */
+          });
+        }
+      } else {
+        sourcesInfo = await fetchSourcesData(searchTitle || videoTitle);
+        if (
+          currentSource &&
+          currentId &&
+          !sourcesInfo.some(
+            (source) =>
+              source.source === currentSource && source.id === currentId
+          )
+        ) {
+          sourcesInfo = await fetchSourceDetail(currentSource, currentId);
+        }
+        if (sourcesInfo.length === 0) {
+          setError('未找到匹配结果');
+          setLoading(false);
+          return;
+        }
+
+        detailData = sourcesInfo[0];
+        // 指定源和id且无需优选
+        if (currentSource && currentId && !needPreferRef.current) {
+          const target = sourcesInfo.find(
+            (source) =>
+              source.source === currentSource && source.id === currentId
+          );
+          if (target) {
+            detailData = target;
+          } else {
+            setError('未找到匹配结果');
+            setLoading(false);
+            return;
+          }
+        }
+
+        // 未指定源和 id 或需要优选，且开启优选开关
+        if (
+          (!currentSource || !currentId || needPreferRef.current) &&
+          optimizationEnabled
+        ) {
+          setLoadingStage('preferring');
+          setLoadingMessage('⚡ 正在优选最佳播放源...');
+
+          detailData = await preferBestSource(sourcesInfo);
+        }
       }
 
-      // 未指定源和 id 或需要优选，且开启优选开关
-      if (
-        (!currentSource || !currentId || needPreferRef.current) &&
-        optimizationEnabled
-      ) {
-        setLoadingStage('preferring');
-        setLoadingMessage('⚡ 正在优选最佳播放源...');
-
-        detailData = await preferBestSource(sourcesInfo);
+      if (!detailData) {
+        setError('未找到匹配结果');
+        setLoading(false);
+        return;
       }
 
       console.log(detailData.source, detailData.id);
@@ -732,10 +774,10 @@ function PlayPageClient() {
       setLoadingStage('ready');
       setLoadingMessage('✨ 准备就绪，即将开始播放...');
 
-      // 短暂延迟让用户看到完成状态
+      // 缩短就绪提示，尽快进入播放
       setTimeout(() => {
         setLoading(false);
-      }, 1000);
+      }, 200);
     };
 
     initAll();
@@ -1221,6 +1263,37 @@ function PlayPageClient() {
     }
 
     try {
+      // 基于已加载的 Hls 创建去广告 Loader
+      class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
+        constructor(config: any) {
+          super(config);
+          const load = this.load.bind(this);
+          this.load = function (context: any, config: any, callbacks: any) {
+            // 拦截manifest和level请求
+            if (
+              (context as any).type === 'manifest' ||
+              (context as any).type === 'level'
+            ) {
+              const onSuccess = callbacks.onSuccess;
+              callbacks.onSuccess = function (
+                response: any,
+                stats: any,
+                context: any
+              ) {
+                // 如果是m3u8文件，处理内容以移除广告分段
+                if (response.data && typeof response.data === 'string') {
+                  // 过滤掉广告段 - 实现更精确的广告过滤逻辑
+                  response.data = filterAdsFromM3U8(response.data);
+                }
+                return onSuccess(response, stats, context, null);
+              };
+            }
+            // 执行原始load方法
+            load(context, config, callbacks);
+          };
+        }
+      }
+
       // 创建新的播放器实例
       Artplayer.PLAYBACK_RATE = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
       Artplayer.USE_RAF = true;
@@ -1348,7 +1421,7 @@ function PlayPageClient() {
             name: '跳过片头片尾',
             html: '跳过片头片尾',
             switch: skipConfigRef.current.enable,
-            onSwitch: function (item) {
+            onSwitch: function (item: { switch: boolean }) {
               const newConfig = {
                 ...skipConfigRef.current,
                 enable: !item.switch,

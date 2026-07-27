@@ -3,7 +3,7 @@
 import { CheckCircle, Heart, Link, PlayCircleIcon } from 'lucide-react';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
   deleteFavorite,
@@ -14,7 +14,7 @@ import {
   subscribeToDataUpdates,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
-import { processImageUrl } from '@/lib/utils';
+import { getEpisodeCount, processImageUrl } from '@/lib/utils';
 
 import { ImagePlaceholder } from '@/components/ImagePlaceholder';
 
@@ -37,7 +37,7 @@ interface VideoCardProps {
   type?: string;
 }
 
-export default function VideoCard({
+function VideoCard({
   id,
   title = '',
   query = '',
@@ -69,7 +69,7 @@ export default function VideoCard({
       if (item.douban_id && item.douban_id !== 0) {
         countMap.set(item.douban_id, (countMap.get(item.douban_id) || 0) + 1);
       }
-      const len = item.episodes?.length || 0;
+      const len = getEpisodeCount(item);
       if (len > 0) {
         episodeCountMap.set(len, (episodeCountMap.get(len) || 0) + 1);
       }
@@ -107,7 +107,7 @@ export default function VideoCard({
   const actualYear = aggregateData?.first.year ?? year;
   const actualQuery = query || '';
   const actualSearchType = isAggregate
-    ? aggregateData?.first.episodes?.length === 1
+    ? getEpisodeCount(aggregateData?.first || {}) === 1
       ? 'movie'
       : 'tv'
     : type;
@@ -281,17 +281,19 @@ export default function VideoCard({
           src={processImageUrl(actualPoster)}
           alt={actualTitle}
           fill
+          sizes='(max-width: 640px) 33vw, 180px'
+          loading='lazy'
           className='object-cover'
           referrerPolicy='no-referrer'
           onLoadingComplete={() => setIsLoading(true)}
         />
 
-        {/* 悬浮遮罩 */}
-        <div className='absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 transition-opacity duration-300 ease-in-out group-hover:opacity-100' />
+        {/* 悬浮遮罩：触摸端半透明显示，便于发现可点区域 */}
+        <div className='absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-40 sm:opacity-0 transition-opacity duration-300 ease-in-out group-hover:opacity-100' />
 
-        {/* 播放按钮 */}
+        {/* 播放按钮：移动端常显弱化图标 */}
         {config.showPlayButton && (
-          <div className='absolute inset-0 flex items-center justify-center opacity-0 transition-all duration-300 ease-in-out delay-75 group-hover:opacity-100 group-hover:scale-100'>
+          <div className='absolute inset-0 flex items-center justify-center opacity-70 sm:opacity-0 transition-all duration-300 ease-in-out delay-75 group-hover:opacity-100 group-hover:scale-100'>
             <PlayCircleIcon
               size={50}
               strokeWidth={0.8}
@@ -300,9 +302,9 @@ export default function VideoCard({
           </div>
         )}
 
-        {/* 操作按钮 */}
+        {/* 操作按钮：触摸端始终可见 */}
         {(config.showHeart || config.showCheckCircle) && (
-          <div className='absolute bottom-3 right-3 flex gap-3 opacity-0 translate-y-2 transition-all duration-300 ease-in-out group-hover:opacity-100 group-hover:translate-y-0'>
+          <div className='absolute bottom-3 right-3 flex gap-3 opacity-100 translate-y-0 sm:opacity-0 sm:translate-y-2 transition-all duration-300 ease-in-out group-hover:opacity-100 group-hover:translate-y-0'>
             {config.showCheckCircle && (
               <CheckCircle
                 onClick={handleDeleteRecord}
@@ -339,14 +341,14 @@ export default function VideoCard({
           </div>
         )}
 
-        {/* 豆瓣链接 */}
+        {/* 豆瓣链接：触摸端始终可见 */}
         {config.showDoubanLink && actualDoubanId && (
           <a
             href={`https://movie.douban.com/subject/${actualDoubanId}`}
             target='_blank'
             rel='noopener noreferrer'
             onClick={(e) => e.stopPropagation()}
-            className='absolute top-2 left-2 opacity-0 -translate-x-2 transition-all duration-300 ease-in-out delay-100 group-hover:opacity-100 group-hover:translate-x-0'
+            className='absolute top-2 left-2 opacity-100 translate-x-0 sm:opacity-0 sm:-translate-x-2 transition-all duration-300 ease-in-out delay-100 group-hover:opacity-100 group-hover:translate-x-0'
           >
             <div className='bg-green-500 text-white text-xs font-bold w-7 h-7 rounded-full flex items-center justify-center shadow-md hover:bg-green-600 hover:scale-[1.1] transition-all duration-300 ease-out'>
               <Link size={16} />
@@ -388,3 +390,5 @@ export default function VideoCard({
     </div>
   );
 }
+
+export default memo(VideoCard);

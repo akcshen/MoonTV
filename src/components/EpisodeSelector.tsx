@@ -10,7 +10,11 @@ import React, {
 } from 'react';
 
 import { SearchResult } from '@/lib/types';
-import { getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
+import {
+  getEpisodeCount,
+  getVideoResolutionFromM3u8,
+  processImageUrl,
+} from '@/lib/utils';
 
 // 定义视频信息类型
 interface VideoInfo {
@@ -563,9 +567,9 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
                             <span className='text-xs px-2 py-1 border border-gray-500/60 rounded text-gray-700 dark:text-gray-300'>
                               {source.source_name}
                             </span>
-                            {source.episodes.length > 1 && (
+                            {getEpisodeCount(source) > 1 && (
                               <span className='text-xs text-gray-500 dark:text-gray-400 font-medium'>
-                                {source.episodes.length} 集
+                                {getEpisodeCount(source)} 集
                               </span>
                             )}
                           </div>

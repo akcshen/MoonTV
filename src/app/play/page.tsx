@@ -994,21 +994,26 @@ function PlayPageClient() {
       }
     }
 
-    // 左箭头 = 快退
+    // 左箭头 = 快退 15 秒
     if (!e.altKey && e.key === 'ArrowLeft') {
-      if (artPlayerRef.current && artPlayerRef.current.currentTime > 5) {
-        artPlayerRef.current.currentTime -= 10;
+      if (artPlayerRef.current && artPlayerRef.current.currentTime > 0) {
+        artPlayerRef.current.currentTime = Math.max(
+          0,
+          artPlayerRef.current.currentTime - 15
+        );
         e.preventDefault();
       }
     }
 
-    // 右箭头 = 快进
+    // 右箭头 = 快进 15 秒
     if (!e.altKey && e.key === 'ArrowRight') {
-      if (
-        artPlayerRef.current &&
-        artPlayerRef.current.currentTime < artPlayerRef.current.duration - 5
-      ) {
-        artPlayerRef.current.currentTime += 10;
+      if (artPlayerRef.current) {
+        const duration = artPlayerRef.current.duration || 0;
+        const currentTime = artPlayerRef.current.currentTime || 0;
+        artPlayerRef.current.currentTime = Math.min(
+          duration > 0 ? duration : currentTime + 15,
+          currentTime + 15
+        );
         e.preventDefault();
       }
     }
@@ -1490,11 +1495,41 @@ function PlayPageClient() {
         controls: [
           {
             position: 'left',
+            index: 11,
+            html: '<i class="art-icon flex"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12.5 3C17.15 3 21 6.85 21 11.5c0 4.65-3.85 8.5-8.5 8.5S4 16.15 4 11.5c0-1.97.68-3.78 1.81-5.22L4.5 5l4.5-.25-.25 4.5-1.56-1.56A6.97 6.97 0 0 0 5.5 11.5c0 3.86 3.14 7 7 7s7-3.14 7-7-3.14-7-7-7V3z" fill="currentColor"/><text x="12.5" y="14.5" text-anchor="middle" font-size="8" font-weight="700" fill="currentColor">15</text></svg></i>',
+            tooltip: '快退 15 秒',
+            click: function () {
+              const player = artPlayerRef.current;
+              if (!player) return;
+              const currentTime = player.currentTime || 0;
+              player.currentTime = Math.max(0, currentTime - 15);
+              player.notice.show = '快退 15 秒';
+            },
+          },
+          {
+            position: 'left',
             index: 13,
             html: '<i class="art-icon flex"><svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" fill="currentColor"/></svg></i>',
             tooltip: '播放下一集',
             click: function () {
               handleNextEpisode();
+            },
+          },
+          {
+            position: 'right',
+            index: 11,
+            html: '<i class="art-icon flex"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11.5 3C6.85 3 3 6.85 3 11.5c0 4.65 3.85 8.5 8.5 8.5s8.5-3.85 8.5-8.5c0-1.97-.68-3.78-1.81-5.22L19.5 5l-4.5-.25.25 4.5 1.56-1.56A6.97 6.97 0 0 1 18.5 11.5c0 3.86-3.14 7-7 7s-7-3.14-7-7 3.14-7 7-7V3z" fill="currentColor"/><text x="11.5" y="14.5" text-anchor="middle" font-size="8" font-weight="700" fill="currentColor">15</text></svg></i>',
+            tooltip: '快进 15 秒',
+            click: function () {
+              const player = artPlayerRef.current;
+              if (!player) return;
+              const currentTime = player.currentTime || 0;
+              const duration = player.duration || 0;
+              player.currentTime = Math.min(
+                duration > 0 ? duration : currentTime + 15,
+                currentTime + 15
+              );
+              player.notice.show = '快进 15 秒';
             },
           },
         ],

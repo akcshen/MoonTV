@@ -26,6 +26,11 @@ import {
   getVideoResolutionFromM3u8,
   processImageUrl,
 } from '@/lib/utils';
+import {
+  copyVideoUrl,
+  DownloadProgress,
+  downloadVideoToLocal,
+} from '@/lib/videoDownload';
 
 import EpisodeSelector from '@/components/EpisodeSelector';
 import PageLayout from '@/components/PageLayout';
@@ -149,6 +154,10 @@ function PlayPageClient() {
 
   // 视频播放地址
   const [videoUrl, setVideoUrl] = useState('');
+  const videoUrlRef = useRef(videoUrl);
+  useEffect(() => {
+    videoUrlRef.current = videoUrl;
+  }, [videoUrl]);
 
   // 总集数
   const totalEpisodes = detail?.episodes?.length || 0;
@@ -196,6 +205,16 @@ function PlayPageClient() {
   const [videoLoadingStage, setVideoLoadingStage] = useState<
     'initing' | 'sourceChanging'
   >('initing');
+
+  // 下载状态
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] =
+    useState<DownloadProgress | null>(null);
+  const downloadAbortRef = useRef<AbortController | null>(null);
+  const isDownloadingRef = useRef(false);
+  const handleDownloadVideoRef = useRef<() => Promise<void>>(async () => {
+    /* placeholder until handler is assigned */
+  });
 
   // 播放进度保存相关
   const saveIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -1244,6 +1263,117 @@ function PlayPageClient() {
     }
   };
 
+  const buildDownloadFilename = () => {
+    const title = videoTitleRef.current || videoTitle || 'video';
+    const episodeCount = detailRef.current?.episodes?.length || totalEpisodes;
+    const episodeIndex = currentEpisodeIndexRef.current;
+    if (episodeCount > 1) {
+      return `${title}-第${episodeIndex + 1}集`;
+    }
+    return title;
+  };
+
+  const handleDownloadVideo = async () => {
+    const url = videoUrlRef.current;
+    if (!url) {
+      if (artPlayerRef.current) {
+        artPlayerRef.current.notice.show = '暂无视频地址';
+      }
+      return;
+    }
+    if (isDownloadingRef.current) return;
+
+    downloadAbortRef.current?.abort();
+    const controller = new AbortController();
+    downloadAbortRef.current = controller;
+    isDownloadingRef.current = true;
+    setIsDownloading(true);
+    setDownloadProgress({
+      phase: 'playlist',
+      current: 0,
+      total: 0,
+      message: '准备下载...',
+    });
+
+    try {
+      await downloadVideoToLocal({
+        url,
+        filename: buildDownloadFilename(),
+        signal: controller.signal,
+        onProgress: (progress) => {
+          setDownloadProgress(progress);
+          if (artPlayerRef.current && progress.phase === 'segments') {
+            artPlayerRef.current.notice.show = progress.message;
+          }
+        },
+      });
+      if (artPlayerRef.current) {
+        artPlayerRef.current.notice.show = '下载完成';
+      }
+    } catch (err) {
+      if ((err as Error)?.name === 'AbortError') {
+        if (artPlayerRef.current) {
+          artPlayerRef.current.notice.show = '下载已取消';
+        }
+      } else {
+        const message = err instanceof Error ? err.message : '下载失败';
+        console.error('下载失败:', err);
+        try {
+          await copyVideoUrl(url);
+          setDownloadProgress({
+            phase: 'error',
+            current: 0,
+            total: 0,
+            message: `${message}（已复制播放地址）`,
+          });
+          if (artPlayerRef.current) {
+            artPlayerRef.current.notice.show = '下载失败，已复制播放地址';
+          }
+        } catch {
+          setDownloadProgress({
+            phase: 'error',
+            current: 0,
+            total: 0,
+            message,
+          });
+          if (artPlayerRef.current) {
+            artPlayerRef.current.notice.show = message;
+          }
+        }
+      }
+    } finally {
+      isDownloadingRef.current = false;
+      setIsDownloading(false);
+      downloadAbortRef.current = null;
+      setTimeout(() => {
+        setDownloadProgress((prev) =>
+          prev?.phase === 'done' || prev?.phase === 'error' ? null : prev
+        );
+      }, 4000);
+    }
+  };
+  handleDownloadVideoRef.current = handleDownloadVideo;
+
+  const handleCancelDownload = () => {
+    downloadAbortRef.current?.abort();
+  };
+
+  const handleCopyVideoUrl = async () => {
+    const url = videoUrlRef.current;
+    if (!url) return;
+    try {
+      await copyVideoUrl(url);
+      if (artPlayerRef.current) {
+        artPlayerRef.current.notice.show = '已复制播放地址';
+      }
+    } catch (err) {
+      console.error('复制失败:', err);
+      if (artPlayerRef.current) {
+        artPlayerRef.current.notice.show = '复制失败';
+      }
+    }
+  };
+
   useEffect(() => {
     if (
       !Artplayer ||
@@ -1608,6 +1738,15 @@ function PlayPageClient() {
               player.notice.show = '快进 15 秒';
             },
           },
+          {
+            position: 'right',
+            index: 20,
+            html: '<i class="art-icon flex"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v10m0 0l3.5-3.5M12 13L8.5 9.5M5 18h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></i>',
+            tooltip: '下载当前集',
+            click: function () {
+              void handleDownloadVideoRef.current();
+            },
+          },
         ],
       });
 
@@ -1784,6 +1923,7 @@ function PlayPageClient() {
   // 当组件卸载时清理定时器与播放器，避免 HLS/ArtPlayer 泄漏
   useEffect(() => {
     return () => {
+      downloadAbortRef.current?.abort();
       if (saveIntervalRef.current) {
         clearInterval(saveIntervalRef.current);
         saveIntervalRef.current = null;
@@ -2111,7 +2251,7 @@ function PlayPageClient() {
           <div className='md:col-span-3'>
             <div className='p-6 flex flex-col min-h-0'>
               {/* 标题 */}
-              <h1 className='text-3xl font-bold mb-2 tracking-wide flex items-center flex-shrink-0 text-center md:text-left w-full'>
+              <h1 className='text-3xl font-bold mb-2 tracking-wide flex items-center flex-shrink-0 text-center md:text-left w-full flex-wrap gap-y-2'>
                 {videoTitle || '影片标题'}
                 <button
                   onClick={(e) => {
@@ -2119,10 +2259,87 @@ function PlayPageClient() {
                     handleToggleFavorite();
                   }}
                   className='ml-3 flex-shrink-0 hover:opacity-80 transition-opacity'
+                  aria-label={favorited ? '取消收藏' : '收藏'}
                 >
                   <FavoriteIcon filled={favorited} />
                 </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleDownloadVideo();
+                  }}
+                  disabled={!videoUrl || isDownloading}
+                  className='ml-2 flex-shrink-0 inline-flex items-center gap-1.5 rounded-full border border-gray-500/40 px-3 py-1 text-sm font-medium text-gray-700 hover:border-green-500 hover:text-green-600 disabled:opacity-50 disabled:cursor-not-allowed dark:text-gray-200 dark:hover:text-green-400 transition-colors'
+                  aria-label='下载当前集'
+                  title='下载当前集到本地'
+                >
+                  <svg
+                    width='16'
+                    height='16'
+                    viewBox='0 0 24 24'
+                    fill='none'
+                    xmlns='http://www.w3.org/2000/svg'
+                    aria-hidden='true'
+                  >
+                    <path
+                      d='M12 3v10m0 0l3.5-3.5M12 13L8.5 9.5M5 18h14'
+                      stroke='currentColor'
+                      strokeWidth='2'
+                      strokeLinecap='round'
+                      strokeLinejoin='round'
+                    />
+                  </svg>
+                  {isDownloading ? '下载中' : '下载'}
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleCopyVideoUrl();
+                  }}
+                  disabled={!videoUrl}
+                  className='ml-2 flex-shrink-0 inline-flex items-center gap-1.5 rounded-full border border-gray-500/40 px-3 py-1 text-sm font-medium text-gray-700 hover:border-green-500 hover:text-green-600 disabled:opacity-50 disabled:cursor-not-allowed dark:text-gray-200 dark:hover:text-green-400 transition-colors'
+                  aria-label='复制播放地址'
+                  title='复制播放地址'
+                >
+                  复制地址
+                </button>
               </h1>
+              {(isDownloading || downloadProgress) && (
+                <div className='mb-3 flex items-center gap-3 text-sm text-gray-600 dark:text-gray-300'>
+                  <div className='flex-1 max-w-md h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden'>
+                    <div
+                      className='h-full bg-green-500 transition-all duration-300'
+                      style={{
+                        width: `${
+                          downloadProgress && downloadProgress.total > 0
+                            ? Math.min(
+                                100,
+                                Math.round(
+                                  (downloadProgress.current /
+                                    downloadProgress.total) *
+                                    100
+                                )
+                              )
+                            : isDownloading
+                            ? 8
+                            : 100
+                        }%`,
+                      }}
+                    />
+                  </div>
+                  <span className='truncate'>
+                    {downloadProgress?.message || '准备下载...'}
+                  </span>
+                  {isDownloading && (
+                    <button
+                      onClick={handleCancelDownload}
+                      className='text-red-500 hover:text-red-600 flex-shrink-0'
+                    >
+                      取消
+                    </button>
+                  )}
+                </div>
+              )}
 
               {/* 关键信息行 */}
               <div className='flex flex-wrap items-center gap-3 text-base mb-4 opacity-80 flex-shrink-0'>

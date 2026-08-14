@@ -20,6 +20,47 @@ import DoubanCardSkeleton from '@/components/DoubanCardSkeleton';
 import PageLayout from '@/components/PageLayout';
 import VideoCard from '@/components/VideoCard';
 
+type ApiSiteBrief = { key: string; name: string };
+
+const SEARCH_CONCURRENCY = 4;
+
+function sortSearchResults(
+  results: SearchResult[],
+  query: string
+): SearchResult[] {
+  const q = query.trim();
+  return [...results].sort((a, b) => {
+    const aExactMatch = a.title === q;
+    const bExactMatch = b.title === q;
+
+    if (aExactMatch && !bExactMatch) return -1;
+    if (!aExactMatch && bExactMatch) return 1;
+
+    if (a.year === b.year) {
+      return a.title.localeCompare(b.title);
+    }
+    if (a.year === 'unknown' && b.year === 'unknown') {
+      return 0;
+    }
+    if (a.year === 'unknown') return 1;
+    if (b.year === 'unknown') return -1;
+    return parseInt(a.year) > parseInt(b.year) ? -1 : 1;
+  });
+}
+
+function filterYellow(results: SearchResult[]): SearchResult[] {
+  if (
+    typeof window !== 'undefined' &&
+    (window as any).RUNTIME_CONFIG?.DISABLE_YELLOW_FILTER
+  ) {
+    return results;
+  }
+  return results.filter((result) => {
+    const typeName = result.type_name || '';
+    return !yellowWords.some((word: string) => typeName.includes(word));
+  });
+}
+
 function SearchPageClient() {
   // 搜索历史
   const [searchHistory, setSearchHistory] = useState<string[]>([]);
@@ -30,9 +71,11 @@ function SearchPageClient() {
   const searchParams = useSearchParams();
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isSearchingMore, setIsSearchingMore] = useState(false);
   const [showResults, setShowResults] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const resultsRef = useRef<SearchResult[]>([]);
 
   // 获取默认聚合设置：只读取用户本地设置，默认为 true
   const getDefaultAggregate = () => {
@@ -144,7 +187,9 @@ function SearchPageClient() {
     } else {
       setShowResults(false);
       setIsLoading(false);
+      setIsSearchingMore(false);
       setSearchResults([]);
+      resultsRef.current = [];
     }
   }, [searchParams]);
 
@@ -152,58 +197,88 @@ function SearchPageClient() {
     abortControllerRef.current?.abort();
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    const trimmed = query.trim();
 
     try {
       setIsLoading(true);
-      const response = await fetch(
-        `/api/search?q=${encodeURIComponent(query.trim())}&lite=1`,
-        { signal: controller.signal }
-      );
-      const data = await response.json();
-      let results = data.results || [];
-      if (
-        typeof window !== 'undefined' &&
-        !(window as any).RUNTIME_CONFIG?.DISABLE_YELLOW_FILTER
-      ) {
-        results = results.filter((result: SearchResult) => {
-          const typeName = result.type_name || '';
-          return !yellowWords.some((word: string) => typeName.includes(word));
-        });
+      setIsSearchingMore(false);
+      setSearchResults([]);
+      resultsRef.current = [];
+
+      // 先拉可用源，再按源并发搜索：快源先出结果
+      const resourcesRes = await fetch('/api/search/resources', {
+        signal: controller.signal,
+      });
+      if (!resourcesRes.ok) {
+        throw new Error('获取搜索源失败');
       }
-      setSearchResults(
-        results.sort((a: SearchResult, b: SearchResult) => {
-          // 优先排序：标题与搜索词完全一致的排在前面
-          const aExactMatch = a.title === query.trim();
-          const bExactMatch = b.title === query.trim();
+      const resources = (await resourcesRes.json()) as ApiSiteBrief[];
+      if (!Array.isArray(resources) || resources.length === 0) {
+        setSearchResults([]);
+        return;
+      }
 
-          if (aExactMatch && !bExactMatch) return -1;
-          if (!aExactMatch && bExactMatch) return 1;
+      if (controller.signal.aborted) return;
 
-          // 如果都匹配或都不匹配，则按原来的逻辑排序
-          if (a.year === b.year) {
-            return a.title.localeCompare(b.title);
-          } else {
-            // 处理 unknown 的情况
-            if (a.year === 'unknown' && b.year === 'unknown') {
-              return 0;
-            } else if (a.year === 'unknown') {
-              return 1; // a 排在后面
-            } else if (b.year === 'unknown') {
-              return -1; // b 排在后面
-            } else {
-              // 都是数字年份，按数字大小排序（大的在前面）
-              return parseInt(a.year) > parseInt(b.year) ? -1 : 1;
-            }
+      let pendingIndex = 0;
+      let completed = 0;
+      let firstPaint = false;
+
+      const mergeBatch = (batch: SearchResult[]) => {
+        if (!batch.length || controller.signal.aborted) return;
+        const merged = sortSearchResults(
+          [...resultsRef.current, ...batch],
+          trimmed
+        );
+        resultsRef.current = merged;
+        setSearchResults(merged);
+        if (!firstPaint) {
+          firstPaint = true;
+          setIsLoading(false);
+          setIsSearchingMore(true);
+        }
+      };
+
+      const searchOne = async (site: ApiSiteBrief) => {
+        try {
+          const response = await fetch(
+            `/api/search?q=${encodeURIComponent(
+              trimmed
+            )}&lite=1&source=${encodeURIComponent(site.key)}`,
+            { signal: controller.signal }
+          );
+          if (!response.ok) return;
+          const data = await response.json();
+          mergeBatch(filterYellow(data.results || []));
+        } catch (error) {
+          if ((error as Error)?.name === 'AbortError') throw error;
+          // 单源失败不影响整体
+        } finally {
+          completed += 1;
+          if (completed >= resources.length && !controller.signal.aborted) {
+            setIsSearchingMore(false);
           }
-        })
-      );
-      setShowResults(true);
+        }
+      };
+
+      const worker = async () => {
+        while (!controller.signal.aborted) {
+          const index = pendingIndex++;
+          if (index >= resources.length) return;
+          await searchOne(resources[index]);
+        }
+      };
+
+      const pool = Math.min(SEARCH_CONCURRENCY, resources.length);
+      await Promise.all(Array.from({ length: pool }, () => worker()));
     } catch (error) {
       if ((error as Error)?.name === 'AbortError') return;
       setSearchResults([]);
+      resultsRef.current = [];
     } finally {
       if (!controller.signal.aborted) {
         setIsLoading(false);
+        setIsSearchingMore(false);
       }
     }
   };
@@ -229,11 +304,13 @@ function SearchPageClient() {
         top: 0,
         behavior: 'smooth',
       });
-    } catch (error) {
+    } catch {
       // 如果平滑滚动完全失败，使用立即滚动
       document.body.scrollTop = 0;
     }
   };
+
+  const showInitialSkeleton = isLoading && searchResults.length === 0;
 
   return (
     <PageLayout activePath='/search'>
@@ -257,7 +334,7 @@ function SearchPageClient() {
 
         {/* 搜索结果或搜索历史 */}
         <div className='max-w-[95%] mx-auto mt-12 overflow-visible'>
-          {isLoading ? (
+          {showInitialSkeleton ? (
             <section className='mb-12'>
               <div className='mb-8 flex items-center justify-between'>
                 <h2 className='text-xl font-bold text-gray-800 dark:text-gray-200'>
@@ -276,6 +353,11 @@ function SearchPageClient() {
               <div className='mb-8 flex items-center justify-between'>
                 <h2 className='text-xl font-bold text-gray-800 dark:text-gray-200'>
                   搜索结果
+                  {isSearchingMore && (
+                    <span className='ml-2 text-sm font-normal text-gray-500 dark:text-gray-400'>
+                      继续搜索中...
+                    </span>
+                  )}
                 </h2>
                 {/* 聚合开关 */}
                 <label className='flex items-center gap-2 cursor-pointer select-none'>
@@ -343,7 +425,7 @@ function SearchPageClient() {
                         </div>
                       );
                     })}
-                {searchResults.length === 0 && (
+                {searchResults.length === 0 && !isSearchingMore && (
                   <div className='col-span-full text-center text-gray-500 py-8 dark:text-gray-400'>
                     未找到相关结果
                   </div>

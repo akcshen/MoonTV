@@ -199,6 +199,8 @@ function PlayPageClient() {
   // 播放进度保存相关
   const saveIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastSaveTimeRef = useRef<number>(0);
+  // 已预取的下一集 m3u8，避免重复打请求
+  const prefetchedNextUrlRef = useRef<string | null>(null);
 
   const artPlayerRef = useRef<any>(null);
   const artRef = useRef<HTMLDivElement | null>(null);
@@ -1277,6 +1279,7 @@ function PlayPageClient() {
 
     // 非WebKit浏览器且播放器已存在，使用switch方法切换
     if (!isWebkit && artPlayerRef.current) {
+      prefetchedNextUrlRef.current = null;
       artPlayerRef.current.switch = videoUrl;
       artPlayerRef.current.title = `${videoTitle} - 第${
         currentEpisodeIndex + 1
@@ -1658,13 +1661,40 @@ function PlayPageClient() {
         setIsVideoLoading(false);
       });
 
-      // 监听视频时间更新事件，实现跳过片头片尾
+      // 监听视频时间更新：片头片尾跳过 + 临近结束预取下一集
       artPlayerRef.current.on('video:timeupdate', () => {
-        if (!skipConfigRef.current.enable) return;
-
         const currentTime = artPlayerRef.current.currentTime || 0;
         const duration = artPlayerRef.current.duration || 0;
         const now = Date.now();
+
+        // 临近结束约 30 秒时预热下一集 m3u8，缩短连播等待
+        if (
+          duration > 0 &&
+          currentTime > duration - 30 &&
+          currentEpisodeIndexRef.current <
+            (detailRef.current?.episodes?.length || 1) - 1
+        ) {
+          const nextUrl =
+            detailRef.current?.episodes?.[currentEpisodeIndexRef.current + 1];
+          if (nextUrl && prefetchedNextUrlRef.current !== nextUrl) {
+            prefetchedNextUrlRef.current = nextUrl;
+            try {
+              const controller = new AbortController();
+              setTimeout(() => controller.abort(), 5000);
+              fetch(nextUrl, {
+                method: 'GET',
+                mode: 'cors',
+                signal: controller.signal,
+              }).catch(() => {
+                // 预取失败不影响播放
+              });
+            } catch {
+              // ignore
+            }
+          }
+        }
+
+        if (!skipConfigRef.current.enable) return;
 
         // 限制跳过检查频率为1.5秒一次
         if (now - lastSkipCheckRef.current < 1500) return;
@@ -1750,12 +1780,26 @@ function PlayPageClient() {
     }
   }, [Artplayer, Hls, videoUrl, loading, blockAdEnabled]);
 
-  // 当组件卸载时清理定时器
+  // 当组件卸载时清理定时器与播放器，避免 HLS/ArtPlayer 泄漏
   useEffect(() => {
     return () => {
       if (saveIntervalRef.current) {
         clearInterval(saveIntervalRef.current);
+        saveIntervalRef.current = null;
       }
+      try {
+        const player = artPlayerRef.current;
+        if (player?.video?.hls) {
+          player.video.hls.destroy();
+        }
+        if (player) {
+          player.destroy();
+        }
+      } catch {
+        // ignore destroy errors on unmount
+      }
+      artPlayerRef.current = null;
+      prefetchedNextUrlRef.current = null;
     };
   }, []);
 

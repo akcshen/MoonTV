@@ -11,6 +11,8 @@ export async function GET(request: Request) {
   const query = searchParams.get('q');
   // lite=1：浏览搜索（首屏更快、体积更小）；播放页聚合源请勿传 lite
   const lite = searchParams.get('lite') === '1';
+  // source：单源搜索，供客户端渐进式合并结果
+  const sourceKey = searchParams.get('source');
 
   if (!query) {
     const cacheTime = await getCacheTime();
@@ -27,7 +29,16 @@ export async function GET(request: Request) {
   }
 
   const config = await getConfig();
-  const apiSites = config.SourceConfig.filter((site) => !site.disabled);
+  let apiSites = config.SourceConfig.filter((site) => !site.disabled);
+  if (sourceKey) {
+    apiSites = apiSites.filter((site) => site.key === sourceKey);
+    if (apiSites.length === 0) {
+      return NextResponse.json(
+        { error: `未找到指定的视频源: ${sourceKey}`, results: [] },
+        { status: 404 }
+      );
+    }
+  }
   const searchPromises = apiSites.map((site) =>
     searchFromApi(site, query, { lite })
   );

@@ -430,6 +430,49 @@ async function fetchFromApi<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+// 收藏接口单飞：列表页多卡片同时 isFavorited 时只打一次网络请求
+let favoritesInflight: Promise<Record<string, Favorite>> | null = null;
+let favoritesBackgroundSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function fetchFavoritesSingleFlight(): Promise<Record<string, Favorite>> {
+  if (!favoritesInflight) {
+    favoritesInflight = fetchFromApi<Record<string, Favorite>>(`/api/favorites`)
+      .catch((err) => {
+        throw err;
+      })
+      .finally(() => {
+        favoritesInflight = null;
+      });
+  }
+  return favoritesInflight;
+}
+
+function scheduleFavoritesBackgroundSync(
+  cachedFavorites: Record<string, Favorite>
+): void {
+  if (typeof window === 'undefined') return;
+  if (favoritesBackgroundSyncTimer) return;
+
+  favoritesBackgroundSyncTimer = setTimeout(() => {
+    favoritesBackgroundSyncTimer = null;
+    fetchFavoritesSingleFlight()
+      .then((freshData) => {
+        if (JSON.stringify(cachedFavorites) !== JSON.stringify(freshData)) {
+          cacheManager.cacheFavorites(freshData);
+          window.dispatchEvent(
+            new CustomEvent('favoritesUpdated', {
+              detail: freshData,
+            })
+          );
+        }
+      })
+      .catch((err) => {
+        console.warn('后台同步收藏失败:', err);
+        triggerGlobalError('后台同步收藏失败');
+      });
+  }, 50);
+}
+
 /**
  * 生成存储key
  */
@@ -865,32 +908,13 @@ export async function getAllFavorites(): Promise<Record<string, Favorite>> {
     const cachedData = cacheManager.getCachedFavorites();
 
     if (cachedData) {
-      // 返回缓存数据，同时后台异步更新
-      fetchFromApi<Record<string, Favorite>>(`/api/favorites`)
-        .then((freshData) => {
-          // 只有数据真正不同时才更新缓存
-          if (JSON.stringify(cachedData) !== JSON.stringify(freshData)) {
-            cacheManager.cacheFavorites(freshData);
-            // 触发数据更新事件
-            window.dispatchEvent(
-              new CustomEvent('favoritesUpdated', {
-                detail: freshData,
-              })
-            );
-          }
-        })
-        .catch((err) => {
-          console.warn('后台同步收藏失败:', err);
-          triggerGlobalError('后台同步收藏失败');
-        });
-
+      // 返回缓存数据，同时后台异步更新（合并并发同步）
+      scheduleFavoritesBackgroundSync(cachedData);
       return cachedData;
     } else {
-      // 缓存为空，直接从 API 获取并缓存
+      // 缓存为空，直接从 API 获取并缓存（单飞，避免 N 卡片并发打爆接口）
       try {
-        const freshData = await fetchFromApi<Record<string, Favorite>>(
-          `/api/favorites`
-        );
+        const freshData = await fetchFavoritesSingleFlight();
         cacheManager.cacheFavorites(freshData);
         return freshData;
       } catch (err) {
@@ -1051,32 +1075,12 @@ export async function isFavorited(
     const cachedFavorites = cacheManager.getCachedFavorites();
 
     if (cachedFavorites) {
-      // 返回缓存数据，同时后台异步更新
-      fetchFromApi<Record<string, Favorite>>(`/api/favorites`)
-        .then((freshData) => {
-          // 只有数据真正不同时才更新缓存
-          if (JSON.stringify(cachedFavorites) !== JSON.stringify(freshData)) {
-            cacheManager.cacheFavorites(freshData);
-            // 触发数据更新事件
-            window.dispatchEvent(
-              new CustomEvent('favoritesUpdated', {
-                detail: freshData,
-              })
-            );
-          }
-        })
-        .catch((err) => {
-          console.warn('后台同步收藏失败:', err);
-          triggerGlobalError('后台同步收藏失败');
-        });
-
+      scheduleFavoritesBackgroundSync(cachedFavorites);
       return !!cachedFavorites[key];
     } else {
-      // 缓存为空，直接从 API 获取并缓存
+      // 缓存为空：与 getAllFavorites 共用单飞请求
       try {
-        const freshData = await fetchFromApi<Record<string, Favorite>>(
-          `/api/favorites`
-        );
+        const freshData = await fetchFavoritesSingleFlight();
         cacheManager.cacheFavorites(freshData);
         return !!freshData[key];
       } catch (err) {

@@ -28,7 +28,9 @@ function HomeClient() {
   const [hotMovies, setHotMovies] = useState<DoubanItem[]>([]);
   const [hotTvShows, setHotTvShows] = useState<DoubanItem[]>([]);
   const [hotVarietyShows, setHotVarietyShows] = useState<DoubanItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loadingMovies, setLoadingMovies] = useState(true);
+  const [loadingTv, setLoadingTv] = useState(true);
+  const [loadingVariety, setLoadingVariety] = useState(true);
   const { announcement } = useSite();
 
   const [showAnnouncement, setShowAnnouncement] = useState(false);
@@ -60,31 +62,15 @@ function HomeClient() {
   const [favoriteItems, setFavoriteItems] = useState<FavoriteItem[]>([]);
 
   useEffect(() => {
-    const fetchDoubanData = async () => {
+    const fetchSection = async (
+      loader: () => Promise<{ code: number; list: DoubanItem[] }>,
+      onSuccess: (list: DoubanItem[]) => void,
+      setLoading: (v: boolean) => void
+    ) => {
       try {
-        setLoading(true);
-
-        // 并行获取热门电影、热门剧集和热门综艺
-        const [moviesData, tvShowsData, varietyShowsData] = await Promise.all([
-          getDoubanCategories({
-            kind: 'movie',
-            category: '热门',
-            type: '全部',
-          }),
-          getDoubanCategories({ kind: 'tv', category: 'tv', type: 'tv' }),
-          getDoubanCategories({ kind: 'tv', category: 'show', type: 'show' }),
-        ]);
-
-        if (moviesData.code === 200) {
-          setHotMovies(moviesData.list);
-        }
-
-        if (tvShowsData.code === 200) {
-          setHotTvShows(tvShowsData.list);
-        }
-
-        if (varietyShowsData.code === 200) {
-          setHotVarietyShows(varietyShowsData.list);
+        const data = await loader();
+        if (data.code === 200) {
+          onSuccess(data.list);
         }
       } catch (error) {
         console.error('获取豆瓣数据失败:', error);
@@ -93,7 +79,27 @@ function HomeClient() {
       }
     };
 
-    fetchDoubanData();
+    // 分区独立加载：任一分区先返回即可先渲染，不再被最慢请求拖住
+    void fetchSection(
+      () =>
+        getDoubanCategories({
+          kind: 'movie',
+          category: '热门',
+          type: '全部',
+        }),
+      setHotMovies,
+      setLoadingMovies
+    );
+    void fetchSection(
+      () => getDoubanCategories({ kind: 'tv', category: 'tv', type: 'tv' }),
+      setHotTvShows,
+      setLoadingTv
+    );
+    void fetchSection(
+      () => getDoubanCategories({ kind: 'tv', category: 'show', type: 'show' }),
+      setHotVarietyShows,
+      setLoadingVariety
+    );
   }, []);
 
   // 处理收藏数据更新的函数
@@ -228,7 +234,7 @@ function HomeClient() {
                   </Link>
                 </div>
                 <ScrollableRow>
-                  {loading
+                  {loadingMovies
                     ? // 加载状态显示灰色占位数据
                       Array.from({ length: 8 }).map((_, index) => (
                         <div
@@ -276,7 +282,7 @@ function HomeClient() {
                   </Link>
                 </div>
                 <ScrollableRow>
-                  {loading
+                  {loadingTv
                     ? // 加载状态显示灰色占位数据
                       Array.from({ length: 8 }).map((_, index) => (
                         <div
@@ -323,7 +329,7 @@ function HomeClient() {
                   </Link>
                 </div>
                 <ScrollableRow>
-                  {loading
+                  {loadingVariety
                     ? // 加载状态显示灰色占位数据
                       Array.from({ length: 8 }).map((_, index) => (
                         <div
@@ -373,7 +379,9 @@ function HomeClient() {
                 onClick={() => handleCloseAnnouncement(announcement)}
                 className='text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-white transition-colors'
                 aria-label='关闭'
-              ></button>
+              >
+                ✕
+              </button>
             </div>
             <div className='mb-6'>
               <div className='relative overflow-hidden rounded-lg mb-4 bg-green-50 dark:bg-green-900/20'>

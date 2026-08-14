@@ -249,9 +249,9 @@ function VideoCard({
     return configs[from] || configs.search;
   }, [from, isAggregate, actualDoubanId, rate]);
 
+  // 仅 public 静态默认图走 next/image 优化；代理路径与外链一律 unoptimized
   const isLocalPoster =
-    imgSrc === DEFAULT_POSTER ||
-    (imgSrc.startsWith('/') && !imgSrc.startsWith('//'));
+    imgSrc === DEFAULT_POSTER || imgSrc.startsWith('/default-poster');
 
   return (
     <div

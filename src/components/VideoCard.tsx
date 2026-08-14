@@ -271,7 +271,6 @@ function VideoCard({
           loading='lazy'
           unoptimized={!isLocalPoster}
           className='object-cover'
-          referrerPolicy='no-referrer'
           onLoad={() => setIsLoading(true)}
           onError={() => {
             if (imgFailed) return;

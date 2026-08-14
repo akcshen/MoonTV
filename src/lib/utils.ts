@@ -37,6 +37,9 @@ function getCachedImageProxyUrl(): string | null {
   return cachedImageProxyUrl;
 }
 
+/** 列表/封面加载失败时的默认占位图 */
+export const DEFAULT_POSTER = '/default-poster.svg';
+
 /** 图片代理设置变更时调用，清空缓存 */
 export function invalidateImageProxyCache(): void {
   cachedImageProxyUrl = undefined;
@@ -46,7 +49,7 @@ export function invalidateImageProxyCache(): void {
  * 处理图片 URL，如果设置了图片代理则使用代理
  */
 export function processImageUrl(originalUrl: string): string {
-  if (!originalUrl) return originalUrl;
+  if (!originalUrl) return DEFAULT_POSTER;
 
   const proxyUrl = getCachedImageProxyUrl();
   if (!proxyUrl) return originalUrl;

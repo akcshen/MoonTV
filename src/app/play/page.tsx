@@ -21,6 +21,7 @@ import {
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
 import {
+  DEFAULT_POSTER,
   getEpisodeCount,
   getVideoResolutionFromM3u8,
   processImageUrl,
@@ -2156,17 +2157,18 @@ function PlayPageClient() {
           <div className='hidden md:block md:col-span-1 md:order-first'>
             <div className='pl-0 py-4 pr-6'>
               <div className='bg-gray-300 dark:bg-gray-700 aspect-[2/3] flex items-center justify-center rounded-xl overflow-hidden'>
-                {videoCover ? (
-                  <img
-                    src={processImageUrl(videoCover)}
-                    alt={videoTitle}
-                    className='w-full h-full object-cover'
-                  />
-                ) : (
-                  <span className='text-gray-600 dark:text-gray-400'>
-                    封面图片
-                  </span>
-                )}
+                <img
+                  src={
+                    videoCover ? processImageUrl(videoCover) : DEFAULT_POSTER
+                  }
+                  alt={videoTitle || '封面图片'}
+                  className='w-full h-full object-cover'
+                  onError={(e) => {
+                    const target = e.target as HTMLImageElement;
+                    if (target.src.endsWith(DEFAULT_POSTER)) return;
+                    target.src = DEFAULT_POSTER;
+                  }}
+                />
               </div>
             </div>
           </div>

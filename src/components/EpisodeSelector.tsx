@@ -11,6 +11,7 @@ import React, {
 
 import { SearchResult } from '@/lib/types';
 import {
+  DEFAULT_POSTER,
   getEpisodeCount,
   getVideoResolutionFromM3u8,
   processImageUrl,
@@ -495,17 +496,20 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
                       >
                         {/* 封面 */}
                         <div className='flex-shrink-0 w-12 h-20 bg-gray-300 dark:bg-gray-600 rounded overflow-hidden'>
-                          {source.episodes && source.episodes.length > 0 && (
-                            <img
-                              src={processImageUrl(source.poster)}
-                              alt={source.title}
-                              className='w-full h-full object-cover'
-                              onError={(e) => {
-                                const target = e.target as HTMLImageElement;
-                                target.style.display = 'none';
-                              }}
-                            />
-                          )}
+                          <img
+                            src={
+                              source.poster
+                                ? processImageUrl(source.poster)
+                                : DEFAULT_POSTER
+                            }
+                            alt={source.title}
+                            className='w-full h-full object-cover'
+                            onError={(e) => {
+                              const target = e.target as HTMLImageElement;
+                              if (target.src.endsWith(DEFAULT_POSTER)) return;
+                              target.src = DEFAULT_POSTER;
+                            }}
+                          />
                         </div>
 
                         {/* 信息区域 */}

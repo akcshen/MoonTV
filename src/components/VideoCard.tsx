@@ -14,7 +14,7 @@ import {
   subscribeToDataUpdates,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
-import { getEpisodeCount, processImageUrl } from '@/lib/utils';
+import { DEFAULT_POSTER, getEpisodeCount, processImageUrl } from '@/lib/utils';
 
 import { ImagePlaceholder } from '@/components/ImagePlaceholder';
 
@@ -58,6 +58,8 @@ function VideoCard({
   const router = useRouter();
   const [favorited, setFavorited] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [imgSrc, setImgSrc] = useState(DEFAULT_POSTER);
+  const [imgFailed, setImgFailed] = useState(false);
 
   const isAggregate = from === 'search' && !!items?.length;
 
@@ -111,6 +113,13 @@ function VideoCard({
       ? 'movie'
       : 'tv'
     : type;
+
+  // 海报变更时重置图片状态；空地址直接用默认图
+  useEffect(() => {
+    setImgFailed(false);
+    setIsLoading(false);
+    setImgSrc(processImageUrl(actualPoster || '') || DEFAULT_POSTER);
+  }, [actualPoster]);
 
   // 获取收藏状态
   useEffect(() => {
@@ -276,9 +285,9 @@ function VideoCard({
       <div className='relative aspect-[2/3] overflow-hidden rounded-lg'>
         {/* 骨架屏 */}
         {!isLoading && <ImagePlaceholder aspectRatio='aspect-[2/3]' />}
-        {/* 图片 */}
+        {/* 图片：加载失败时回退默认封面 */}
         <Image
-          src={processImageUrl(actualPoster)}
+          src={imgSrc}
           alt={actualTitle}
           fill
           sizes='(max-width: 640px) 33vw, 180px'
@@ -286,6 +295,12 @@ function VideoCard({
           className='object-cover'
           referrerPolicy='no-referrer'
           onLoadingComplete={() => setIsLoading(true)}
+          onError={() => {
+            if (imgFailed) return;
+            setImgFailed(true);
+            setImgSrc(DEFAULT_POSTER);
+            setIsLoading(true);
+          }}
         />
 
         {/* 悬浮遮罩：触摸端半透明显示，便于发现可点区域 */}

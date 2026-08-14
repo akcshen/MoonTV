@@ -13,6 +13,8 @@ import {
 import ScrollableRow from '@/components/ScrollableRow';
 import VideoCard from '@/components/VideoCard';
 
+const CONTINUE_WATCHING_LIMIT = 16;
+
 interface ContinueWatchingProps {
   className?: string;
 }
@@ -36,7 +38,7 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
       (a, b) => b.save_time - a.save_time
     );
 
-    setPlayRecords(sortedRecords);
+    setPlayRecords(sortedRecords.slice(0, CONTINUE_WATCHING_LIMIT));
   };
 
   useEffect(() => {

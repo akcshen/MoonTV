@@ -430,6 +430,48 @@ async function fetchFromApi<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** 轻量比较：键数量 + save_time，避免 JSON.stringify 整表 */
+function recordMapChangedBySaveTime<T extends { save_time: number }>(
+  a: Record<string, T>,
+  b: Record<string, T>
+): boolean {
+  const keysA = Object.keys(a);
+  if (keysA.length !== Object.keys(b).length) return true;
+  for (const key of keysA) {
+    if (!b[key] || a[key].save_time !== b[key].save_time) return true;
+  }
+  return false;
+}
+
+function stringArrayChanged(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return true;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return true;
+  }
+  return false;
+}
+
+function skipConfigMapChanged(
+  a: Record<string, SkipConfig>,
+  b: Record<string, SkipConfig>
+): boolean {
+  const keysA = Object.keys(a);
+  if (keysA.length !== Object.keys(b).length) return true;
+  for (const key of keysA) {
+    const left = a[key];
+    const right = b[key];
+    if (
+      !right ||
+      left.enable !== right.enable ||
+      left.intro_time !== right.intro_time ||
+      left.outro_time !== right.outro_time
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // 收藏接口单飞：列表页多卡片同时 isFavorited 时只打一次网络请求
 let favoritesInflight: Promise<Record<string, Favorite>> | null = null;
 let favoritesBackgroundSyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -457,7 +499,7 @@ function scheduleFavoritesBackgroundSync(
     favoritesBackgroundSyncTimer = null;
     fetchFavoritesSingleFlight()
       .then((freshData) => {
-        if (JSON.stringify(cachedFavorites) !== JSON.stringify(freshData)) {
+        if (recordMapChangedBySaveTime(cachedFavorites, freshData)) {
           cacheManager.cacheFavorites(freshData);
           window.dispatchEvent(
             new CustomEvent('favoritesUpdated', {
@@ -502,7 +544,7 @@ export async function getAllPlayRecords(): Promise<Record<string, PlayRecord>> {
       fetchFromApi<Record<string, PlayRecord>>(`/api/playrecords`)
         .then((freshData) => {
           // 只有数据真正不同时才更新缓存
-          if (JSON.stringify(cachedData) !== JSON.stringify(freshData)) {
+          if (recordMapChangedBySaveTime(cachedData, freshData)) {
             cacheManager.cachePlayRecords(freshData);
             // 触发数据更新事件，供组件监听
             window.dispatchEvent(
@@ -691,7 +733,7 @@ export async function getSearchHistory(): Promise<string[]> {
       fetchFromApi<string[]>(`/api/searchhistory`)
         .then((freshData) => {
           // 只有数据真正不同时才更新缓存
-          if (JSON.stringify(cachedData) !== JSON.stringify(freshData)) {
+          if (stringArrayChanged(cachedData, freshData)) {
             cacheManager.cacheSearchHistory(freshData);
             // 触发数据更新事件
             window.dispatchEvent(
@@ -1369,7 +1411,7 @@ export async function getSkipConfig(
       fetchFromApi<Record<string, SkipConfig>>(`/api/skipconfigs`)
         .then((freshData) => {
           // 只有数据真正不同时才更新缓存
-          if (JSON.stringify(cachedData) !== JSON.stringify(freshData)) {
+          if (skipConfigMapChanged(cachedData, freshData)) {
             cacheManager.cacheSkipConfigs(freshData);
             // 触发数据更新事件
             window.dispatchEvent(
@@ -1497,7 +1539,7 @@ export async function getAllSkipConfigs(): Promise<Record<string, SkipConfig>> {
       fetchFromApi<Record<string, SkipConfig>>(`/api/skipconfigs`)
         .then((freshData) => {
           // 只有数据真正不同时才更新缓存
-          if (JSON.stringify(cachedData) !== JSON.stringify(freshData)) {
+          if (skipConfigMapChanged(cachedData, freshData)) {
             cacheManager.cacheSkipConfigs(freshData);
             // 触发数据更新事件
             window.dispatchEvent(

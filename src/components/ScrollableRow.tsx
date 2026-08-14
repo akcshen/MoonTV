@@ -51,26 +51,7 @@ export default function ScrollableRow({
       window.removeEventListener('resize', checkScroll);
       resizeObserver.disconnect();
     };
-  }, [children]); // 依赖 children，当子组件变化时重新检查
-
-  // 添加一个额外的效果来监听子组件的变化
-  useEffect(() => {
-    if (containerRef.current) {
-      // 监听 DOM 变化
-      const observer = new MutationObserver(() => {
-        setTimeout(checkScroll, 100);
-      });
-
-      observer.observe(containerRef.current, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['style', 'class'],
-      });
-
-      return () => observer.disconnect();
-    }
-  }, []);
+  }, [children]); // 依赖 children，当子组件数量变化时重新检查
 
   const handleScrollRightClick = () => {
     if (containerRef.current) {

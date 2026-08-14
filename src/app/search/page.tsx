@@ -19,6 +19,7 @@ import { yellowWords } from '@/lib/yellow';
 import DoubanCardSkeleton from '@/components/DoubanCardSkeleton';
 import PageLayout from '@/components/PageLayout';
 import VideoCard from '@/components/VideoCard';
+import VirtualizedCardGrid from '@/components/VirtualizedCardGrid';
 
 type ApiSiteBrief = { key: string; name: string };
 
@@ -378,59 +379,57 @@ function SearchPageClient() {
                   </div>
                 </label>
               </div>
-              <div
-                key={`search-results-${viewMode}`}
-                className='justify-start grid grid-cols-3 gap-x-2 gap-y-14 sm:gap-y-20 px-0 sm:px-2 sm:grid-cols-[repeat(auto-fill,_minmax(11rem,_1fr))] sm:gap-x-8'
-              >
-                {viewMode === 'agg'
-                  ? aggregatedResults.map(([mapKey, group]) => {
-                      return (
-                        <div key={`agg-${mapKey}`} className='w-full'>
-                          <VideoCard
-                            from='search'
-                            items={group}
-                            query={
-                              searchQuery.trim() !== group[0].title
-                                ? searchQuery.trim()
-                                : ''
-                            }
-                          />
-                        </div>
-                      );
-                    })
-                  : searchResults.map((item) => {
-                      const episodeCount = getEpisodeCount(item);
-                      return (
-                        <div
-                          key={`all-${item.source}-${item.id}`}
-                          className='w-full'
-                        >
-                          <VideoCard
-                            id={item.id}
-                            title={item.title + ' ' + item.type_name}
-                            poster={item.poster}
-                            episodes={episodeCount}
-                            source={item.source}
-                            source_name={item.source_name}
-                            douban_id={item.douban_id?.toString()}
-                            query={
-                              searchQuery.trim() !== item.title
-                                ? searchQuery.trim()
-                                : ''
-                            }
-                            year={item.year}
-                            from='search'
-                            type={episodeCount > 1 ? 'tv' : 'movie'}
-                          />
-                        </div>
-                      );
-                    })}
-                {searchResults.length === 0 && !isSearchingMore && (
-                  <div className='col-span-full text-center text-gray-500 py-8 dark:text-gray-400'>
-                    未找到相关结果
-                  </div>
-                )}
-              </div>
+              {viewMode === 'agg' ? (
+                <VirtualizedCardGrid
+                  key='search-results-agg'
+                  items={aggregatedResults}
+                  getItemKey={([mapKey]) => `agg-${mapKey}`}
+                  renderItem={([, group]) => (
+                    <VideoCard
+                      from='search'
+                      items={group}
+                      query={
+                        searchQuery.trim() !== group[0].title
+                          ? searchQuery.trim()
+                          : ''
+                      }
+                    />
+                  )}
+                />
+              ) : (
+                <VirtualizedCardGrid
+                  key='search-results-all'
+                  items={searchResults}
+                  getItemKey={(item) => `all-${item.source}-${item.id}`}
+                  renderItem={(item) => {
+                    const episodeCount = getEpisodeCount(item);
+                    return (
+                      <VideoCard
+                        id={item.id}
+                        title={item.title + ' ' + item.type_name}
+                        poster={item.poster}
+                        episodes={episodeCount}
+                        source={item.source}
+                        source_name={item.source_name}
+                        douban_id={item.douban_id?.toString()}
+                        query={
+                          searchQuery.trim() !== item.title
+                            ? searchQuery.trim()
+                            : ''
+                        }
+                        year={item.year}
+                        from='search'
+                        type={episodeCount > 1 ? 'tv' : 'movie'}
+                      />
+                    );
+                  }}
+                />
+              )}
+              {searchResults.length === 0 && !isSearchingMore && (
+                <div className='col-span-full text-center text-gray-500 py-8 dark:text-gray-400'>
+                  未找到相关结果
+                </div>
+              )}
             </section>
           ) : searchHistory.length > 0 ? (
             // 搜索历史

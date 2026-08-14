@@ -47,14 +47,20 @@ export function invalidateImageProxyCache(): void {
 
 /**
  * 处理图片 URL，如果设置了图片代理则使用代理
+ * @param width 列表海报建议 360，便于代理/CDN 缩小体积
  */
-export function processImageUrl(originalUrl: string): string {
+export function processImageUrl(originalUrl: string, width = 0): string {
   if (!originalUrl) return DEFAULT_POSTER;
 
   const proxyUrl = getCachedImageProxyUrl();
   if (!proxyUrl) return originalUrl;
 
-  return `${proxyUrl}${encodeURIComponent(originalUrl)}`;
+  const encoded = `${proxyUrl}${encodeURIComponent(originalUrl)}`;
+  if (width > 0 && proxyUrl.includes('/api/image-proxy')) {
+    const sep = encoded.includes('?') ? '&' : '?';
+    return `${encoded}${sep}w=${width}`;
+  }
+  return encoded;
 }
 
 /**

@@ -9,13 +9,12 @@ import {
   deleteFavorite,
   deletePlayRecord,
   generateStorageKey,
-  isFavorited,
   saveFavorite,
-  subscribeToDataUpdates,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
 import { DEFAULT_POSTER, getEpisodeCount, processImageUrl } from '@/lib/utils';
 
+import { useFavoritesContext } from '@/components/FavoritesProvider';
 import { ImagePlaceholder } from '@/components/ImagePlaceholder';
 
 interface VideoCardProps {
@@ -56,7 +55,7 @@ function VideoCard({
   type = '',
 }: VideoCardProps) {
   const router = useRouter();
-  const [favorited, setFavorited] = useState(false);
+  const favoritesCtx = useFavoritesContext();
   const [isLoading, setIsLoading] = useState(false);
   const [imgSrc, setImgSrc] = useState(DEFAULT_POSTER);
   const [imgFailed, setImgFailed] = useState(false);
@@ -114,41 +113,19 @@ function VideoCard({
       : 'tv'
     : type;
 
+  const favoriteStorageKey =
+    actualSource && actualId ? generateStorageKey(actualSource, actualId) : '';
+  const favorited =
+    from !== 'douban' && favoriteStorageKey && favoritesCtx
+      ? !!favoritesCtx.favorites[favoriteStorageKey]
+      : false;
+
   // 海报变更时重置图片状态；空地址直接用默认图
   useEffect(() => {
     setImgFailed(false);
     setIsLoading(false);
-    setImgSrc(processImageUrl(actualPoster || '') || DEFAULT_POSTER);
+    setImgSrc(processImageUrl(actualPoster || '', 360) || DEFAULT_POSTER);
   }, [actualPoster]);
-
-  // 获取收藏状态
-  useEffect(() => {
-    if (from === 'douban' || !actualSource || !actualId) return;
-
-    const fetchFavoriteStatus = async () => {
-      try {
-        const fav = await isFavorited(actualSource, actualId);
-        setFavorited(fav);
-      } catch (err) {
-        throw new Error('检查收藏状态失败');
-      }
-    };
-
-    fetchFavoriteStatus();
-
-    // 监听收藏状态更新事件
-    const storageKey = generateStorageKey(actualSource, actualId);
-    const unsubscribe = subscribeToDataUpdates(
-      'favoritesUpdated',
-      (newFavorites: Record<string, any>) => {
-        // 检查当前项目是否在新的收藏列表中
-        const isNowFavorited = !!newFavorites[storageKey];
-        setFavorited(isNowFavorited);
-      }
-    );
-
-    return unsubscribe;
-  }, [from, actualSource, actualId]);
 
   const handleToggleFavorite = useCallback(
     async (e: React.MouseEvent) => {
@@ -157,11 +134,8 @@ function VideoCard({
       if (from === 'douban' || !actualSource || !actualId) return;
       try {
         if (favorited) {
-          // 如果已收藏，删除收藏
           await deleteFavorite(actualSource, actualId);
-          setFavorited(false);
         } else {
-          // 如果未收藏，添加收藏
           await saveFavorite(actualSource, actualId, {
             title: actualTitle,
             source_name: source_name || '',
@@ -170,10 +144,9 @@ function VideoCard({
             total_episodes: actualEpisodes ?? 1,
             save_time: Date.now(),
           });
-          setFavorited(true);
         }
-      } catch (err) {
-        throw new Error('切换收藏状态失败');
+      } catch {
+        // 收藏切换失败由 db.client 全局提示
       }
     },
     [

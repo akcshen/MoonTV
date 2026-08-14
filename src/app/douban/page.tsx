@@ -14,6 +14,7 @@ import DoubanCustomSelector from '@/components/DoubanCustomSelector';
 import DoubanSelector from '@/components/DoubanSelector';
 import PageLayout from '@/components/PageLayout';
 import VideoCard from '@/components/VideoCard';
+import VirtualizedCardGrid from '@/components/VirtualizedCardGrid';
 
 function DoubanPageClient() {
   const searchParams = useSearchParams();
@@ -415,26 +416,30 @@ function DoubanPageClient() {
 
         {/* 内容展示区域 */}
         <div className='max-w-[95%] mx-auto mt-8 overflow-visible'>
-          {/* 内容网格 */}
-          <div className='justify-start grid grid-cols-3 gap-x-2 gap-y-12 px-0 sm:px-2 sm:grid-cols-[repeat(auto-fill,minmax(160px,1fr))] sm:gap-x-8 sm:gap-y-20'>
-            {loading || !selectorsReady
-              ? // 显示骨架屏
-                skeletonData.map((index) => <DoubanCardSkeleton key={index} />)
-              : // 显示实际数据
-                doubanData.map((item, index) => (
-                  <div key={`${item.title}-${index}`} className='w-full'>
-                    <VideoCard
-                      from='douban'
-                      title={item.title}
-                      poster={item.poster}
-                      douban_id={item.id}
-                      rate={item.rate}
-                      year={item.year}
-                      type={type === 'movie' ? 'movie' : ''} // 电影类型严格控制，tv 不控
-                    />
-                  </div>
-                ))}
-          </div>
+          {loading || !selectorsReady ? (
+            <div className='justify-start grid grid-cols-3 gap-x-2 gap-y-12 px-0 sm:px-2 sm:grid-cols-[repeat(auto-fill,minmax(160px,1fr))] sm:gap-x-8 sm:gap-y-20'>
+              {skeletonData.map((index) => (
+                <DoubanCardSkeleton key={index} />
+              ))}
+            </div>
+          ) : (
+            <VirtualizedCardGrid
+              items={doubanData}
+              estimateRowHeight={320}
+              getItemKey={(item, index) => `${item.title}-${index}`}
+              renderItem={(item) => (
+                <VideoCard
+                  from='douban'
+                  title={item.title}
+                  poster={item.poster}
+                  douban_id={item.id}
+                  rate={item.rate}
+                  year={item.year}
+                  type={type === 'movie' ? 'movie' : ''}
+                />
+              )}
+            />
+          )}
 
           {/* 加载更多指示器 */}
           {hasMore && !loading && (

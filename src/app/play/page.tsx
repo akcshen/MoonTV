@@ -19,18 +19,18 @@ import {
   saveSkipConfig,
   subscribeToDataUpdates,
 } from '@/lib/db.client';
+import { loadVideoDownload } from '@/lib/lazyVideoDownload';
+import {
+  filterResultsByTitle,
+  searchSourcesProgressive,
+} from '@/lib/progressiveSearch';
 import { SearchResult } from '@/lib/types';
 import {
   DEFAULT_POSTER,
-  getEpisodeCount,
   getVideoResolutionFromM3u8,
   processImageUrl,
 } from '@/lib/utils';
-import {
-  copyVideoUrl,
-  DownloadProgress,
-  downloadVideoToLocal,
-} from '@/lib/videoDownload';
+import type { DownloadProgress } from '@/lib/videoDownload';
 
 import EpisodeSelector from '@/components/EpisodeSelector';
 import PageLayout from '@/components/PageLayout';
@@ -691,29 +691,23 @@ function PlayPageClient() {
       }
     };
     const fetchSourcesData = async (query: string): Promise<SearchResult[]> => {
-      // 根据搜索词获取全部源信息（播放页需要完整剧集地址，不使用 lite）
       try {
-        const response = await fetch(
-          `/api/search?q=${encodeURIComponent(query.trim())}`
-        );
-        if (!response.ok) {
-          throw new Error('搜索失败');
-        }
-        const data = await response.json();
+        setSourceSearchLoading(true);
+        const filterFn = (batch: SearchResult[]) =>
+          filterResultsByTitle(
+            batch,
+            videoTitleRef.current,
+            videoYearRef.current,
+            searchType
+          );
 
-        // 处理搜索结果，根据规则过滤
-        const results = data.results.filter(
-          (result: SearchResult) =>
-            result.title.replaceAll(' ', '').toLowerCase() ===
-              videoTitleRef.current.replaceAll(' ', '').toLowerCase() &&
-            (videoYearRef.current
-              ? result.year.toLowerCase() === videoYearRef.current.toLowerCase()
-              : true) &&
-            (searchType
-              ? (searchType === 'tv' && getEpisodeCount(result) > 1) ||
-                (searchType === 'movie' && getEpisodeCount(result) === 1)
-              : true)
-        );
+        const results = await searchSourcesProgressive({
+          query,
+          lite: false,
+          filter: filterFn,
+          onBatch: (merged) => setAvailableSources(merged),
+        });
+
         setAvailableSources(results);
         return results;
       } catch (err) {
@@ -1295,12 +1289,14 @@ function PlayPageClient() {
       message: '准备下载...',
     });
 
+    const { downloadVideoToLocal, copyVideoUrl } = await loadVideoDownload();
+
     try {
       await downloadVideoToLocal({
         url,
         filename: buildDownloadFilename(),
         signal: controller.signal,
-        onProgress: (progress) => {
+        onProgress: (progress: DownloadProgress) => {
           setDownloadProgress(progress);
           if (artPlayerRef.current && progress.phase === 'segments') {
             artPlayerRef.current.notice.show = progress.message;
@@ -1362,6 +1358,7 @@ function PlayPageClient() {
     const url = videoUrlRef.current;
     if (!url) return;
     try {
+      const { copyVideoUrl } = await loadVideoDownload();
       await copyVideoUrl(url);
       if (artPlayerRef.current) {
         artPlayerRef.current.notice.show = '已复制播放地址';
@@ -1478,7 +1475,7 @@ function PlayPageClient() {
       artPlayerRef.current = new Artplayer({
         container: artRef.current,
         url: videoUrl,
-        poster: videoCover,
+        poster: processImageUrl(videoCover),
         volume: 0.7,
         isLive: false,
         muted: false,

@@ -77,7 +77,9 @@ export default function VirtualizedCardGrid<T>({
             key={virtualRow.key}
             data-index={virtualRow.index}
             ref={virtualizer.measureElement}
-            className='px-0 sm:px-2'
+            // 行的 transform 会创建层叠上下文，把卡片 hover 时的 z-index 困在行内，
+            // 导致放大的卡片被下一行盖住；悬停时整行提级来跨行浮起
+            className='px-0 sm:px-2 hover:z-10'
             style={{
               position: 'absolute',
               top: 0,

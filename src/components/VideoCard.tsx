@@ -12,7 +12,12 @@ import {
   saveFavorite,
 } from '@/lib/db.client';
 import { SearchResult } from '@/lib/types';
-import { DEFAULT_POSTER, getEpisodeCount, processImageUrl } from '@/lib/utils';
+import {
+  DEFAULT_POSTER,
+  getEpisodeCount,
+  isOptimizableImageSrc,
+  processImageUrl,
+} from '@/lib/utils';
 
 import { useFavoritesContext } from '@/components/FavoritesProvider';
 import { ImagePlaceholder } from '@/components/ImagePlaceholder';
@@ -249,10 +254,6 @@ function VideoCard({
     return configs[from] || configs.search;
   }, [from, isAggregate, actualDoubanId, rate]);
 
-  // 仅 public 静态默认图走 next/image 优化；代理路径与外链一律 unoptimized
-  const isLocalPoster =
-    imgSrc === DEFAULT_POSTER || imgSrc.startsWith('/default-poster');
-
   return (
     <div
       className='group relative w-full rounded-lg bg-transparent cursor-pointer transition-all duration-300 ease-in-out hover:scale-[1.05] hover:z-[500]'
@@ -269,7 +270,7 @@ function VideoCard({
           fill
           sizes='(max-width: 640px) 33vw, 180px'
           loading='lazy'
-          unoptimized={!isLocalPoster}
+          unoptimized={!isOptimizableImageSrc(imgSrc)}
           className='object-cover'
           onLoad={() => setIsLoading(true)}
           onError={() => {

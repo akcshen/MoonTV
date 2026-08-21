@@ -1302,7 +1302,12 @@ function PlayPageClient() {
         signal: controller.signal,
         onProgress: (progress: DownloadProgress) => {
           setDownloadProgress(progress);
-          if (artPlayerRef.current && progress.phase === 'segments') {
+          if (
+            artPlayerRef.current &&
+            (progress.phase === 'segments' ||
+              progress.phase === 'saving' ||
+              progress.phase === 'remux')
+          ) {
             artPlayerRef.current.notice.show = progress.message;
           }
         },

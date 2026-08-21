@@ -40,27 +40,74 @@ function getCachedImageProxyUrl(): string | null {
 /** 列表/封面加载失败时的默认占位图（PNG，兼容 next/image） */
 export const DEFAULT_POSTER = '/default-poster.png';
 
+/** 内置同域图片代理前缀，便于 next/image 优化并规避外链 418 */
+export const BUILTIN_IMAGE_PROXY = '/api/image-proxy?url=';
+
 /** 图片代理设置变更时调用，清空缓存 */
 export function invalidateImageProxyCache(): void {
   cachedImageProxyUrl = undefined;
 }
 
+/** 是否为本地静态资源或已走同域代理的路径（可被 next/image 优化） */
+export function isLocalImageUrl(url: string): boolean {
+  if (!url) return true;
+  if (url === DEFAULT_POSTER || url.startsWith('/default-poster')) return true;
+  if (url.startsWith('/api/image-proxy')) return true;
+  if (url.startsWith('/') && !url.startsWith('//')) return true;
+  return false;
+}
+
+/** VideoCard / next/image 是否可启用优化（外链直连时需 unoptimized） */
+export function isOptimizableImageSrc(src: string): boolean {
+  return isLocalImageUrl(src);
+}
+
+function isImageProxyDisabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  const enableImageProxy = localStorage.getItem('enableImageProxy');
+  if (enableImageProxy !== null) {
+    return !(JSON.parse(enableImageProxy) as boolean);
+  }
+  return false;
+}
+
+/** 用户自定义代理 > 环境变量 > 内置 /api/image-proxy */
+function getEffectiveImageProxyPrefix(): string | null {
+  if (isImageProxyDisabled()) return null;
+
+  if (typeof window !== 'undefined') {
+    const custom = getCachedImageProxyUrl();
+    if (custom) return custom;
+    return BUILTIN_IMAGE_PROXY;
+  }
+
+  const serverProxy = process.env.NEXT_PUBLIC_IMAGE_PROXY?.trim();
+  if (serverProxy) return serverProxy;
+  return BUILTIN_IMAGE_PROXY;
+}
+
+function appendWidthParam(encodedUrl: string, width: number): string {
+  if (width <= 0) return encodedUrl;
+  const sep = encodedUrl.includes('?') ? '&' : '?';
+  return `${encodedUrl}${sep}w=${width}`;
+}
+
 /**
- * 处理图片 URL，如果设置了图片代理则使用代理
+ * 处理图片 URL：外链默认走同域 /api/image-proxy，便于 next/image 优化
  * @param width 列表海报建议 360，便于代理/CDN 缩小体积
  */
 export function processImageUrl(originalUrl: string, width = 0): string {
   if (!originalUrl) return DEFAULT_POSTER;
+  if (isLocalImageUrl(originalUrl)) return originalUrl;
 
-  const proxyUrl = getCachedImageProxyUrl();
-  if (!proxyUrl) return originalUrl;
+  const proxyPrefix = getEffectiveImageProxyPrefix();
+  if (!proxyPrefix) return originalUrl;
 
-  const encoded = `${proxyUrl}${encodeURIComponent(originalUrl)}`;
-  if (width > 0 && proxyUrl.includes('/api/image-proxy')) {
-    const sep = encoded.includes('?') ? '&' : '?';
-    return `${encoded}${sep}w=${width}`;
-  }
-  return encoded;
+  const encoded = `${proxyPrefix}${encodeURIComponent(originalUrl)}`;
+  const supportsWidth =
+    proxyPrefix.includes('/api/image-proxy') ||
+    encoded.includes('/api/image-proxy');
+  return supportsWidth ? appendWidthParam(encoded, width) : encoded;
 }
 
 /**

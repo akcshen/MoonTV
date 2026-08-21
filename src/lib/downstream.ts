@@ -185,14 +185,63 @@ export async function searchFromApi(
 // 匹配 m3u8 链接的正则
 const M3U8_PATTERN = /(https?:\/\/[^"'\s]+?\.m3u8)/g;
 
+/**
+ * vod_play_url 可能包含多组播放源（$$$ 分隔），且第一组未必可播。
+ * 例如电影天堂的 dytt 组是 /share/ 网页链接，dyttm3u8 组才是真正的流地址，
+ * 所以按 m3u8 数量择优，全都没有 m3u8 时退回集数最多的一组。
+ */
+function pickPlayableEpisodes(vodPlayUrl?: string): string[] {
+  if (!vodPlayUrl) return [];
+
+  let best: string[] = [];
+  let bestM3u8Count = -1;
+
+  vodPlayUrl.split('$$$').forEach((group) => {
+    const urls = group
+      .split('#')
+      .map((episode) => {
+        const parts = episode.split('$');
+        return parts.length > 1 ? parts[1] : '';
+      })
+      .filter((url) => url.startsWith('http://') || url.startsWith('https://'));
+
+    const m3u8Count = urls.filter((url) => url.includes('.m3u8')).length;
+    if (
+      m3u8Count > bestM3u8Count ||
+      (m3u8Count === bestM3u8Count && urls.length > best.length)
+    ) {
+      bestM3u8Count = m3u8Count;
+      best = urls;
+    }
+  });
+
+  return best;
+}
+
 export async function getDetailFromApi(
   apiSite: ApiSite,
   id: string
 ): Promise<SearchResult> {
   if (apiSite.detail) {
-    return handleSpecialSourceDetail(id, apiSite);
+    // 详情页可能被防爬拦截（如电影天堂返回 "Verify Yourself" 验证页），
+    // 此时标准接口通常仍可用，回退过去而不是返回空剧集
+    try {
+      const detail = await handleSpecialSourceDetail(id, apiSite);
+      if (detail.episodes.length > 0) {
+        return detail;
+      }
+    } catch {
+      // 忽略，转由标准接口兜底
+    }
   }
 
+  return fetchDetailFromStandardApi(apiSite, id);
+}
+
+async function fetchDetailFromStandardApi(
+  apiSite: ApiSite,
+  id: string
+): Promise<SearchResult> {
   const detailUrl = `${apiSite.api}${API_CONFIG.detail.path}${id}`;
 
   const controller = new AbortController();
@@ -221,25 +270,7 @@ export async function getDetailFromApi(
   }
 
   const videoDetail = data.list[0];
-  let episodes: string[] = [];
-
-  // 处理播放源拆分
-  if (videoDetail.vod_play_url) {
-    const playSources = videoDetail.vod_play_url.split('$$$');
-    if (playSources.length > 0) {
-      const mainSource = playSources[0];
-      const episodeList = mainSource.split('#');
-      episodes = episodeList
-        .map((ep: string) => {
-          const parts = ep.split('$');
-          return parts.length > 1 ? parts[1] : '';
-        })
-        .filter(
-          (url: string) =>
-            url && (url.startsWith('http://') || url.startsWith('https://'))
-        );
-    }
-  }
+  let episodes = pickPlayableEpisodes(videoDetail.vod_play_url);
 
   // 如果播放源为空，则尝试从内容中解析 m3u8
   if (episodes.length === 0 && videoDetail.vod_content) {

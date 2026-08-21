@@ -33,6 +33,8 @@ export const DEFAULT_SHORT_DRAMA_SOURCE_LIMIT = 6;
  * 所以父子都要取，但要限制请求数量。
  */
 const MAX_CATEGORIES_PER_SITE = 4;
+/** 单个资源站每页最多贡献的条目数，与单分类一页的量级一致 */
+const MAX_ITEMS_PER_SOURCE = 20;
 
 const CATEGORY_LIST_TIMEOUT = 5000;
 const VIDEO_LIST_TIMEOUT = 8000;
@@ -285,8 +287,11 @@ export function mergeShortDramaItems(
     else bySource.set(item.source, [item]);
   });
 
-  const queues = Array.from(bySource.values());
-  queues.forEach((queue) => queue.sort(compareByRecency));
+  const queues = Array.from(bySource.values()).map((queue) =>
+    // 分类多的源会成倍贡献条目（暴风资源一页就占 80/183），一旦该源整站失效
+    // 就会拖垮整页可播率，轮流取用到后段更是只剩它，所以按源设配额
+    queue.sort(compareByRecency).slice(0, MAX_ITEMS_PER_SOURCE)
+  );
 
   const merged: ShortDramaItem[] = [];
   const maxLength = queues.reduce(

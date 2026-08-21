@@ -4,21 +4,17 @@
 
 import { ChevronRight } from 'lucide-react';
 import Link from 'next/link';
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 
-// 客户端收藏 API
-import {
-  clearAllFavorites,
-  getAllFavorites,
-  getAllPlayRecords,
-  subscribeToDataUpdates,
-} from '@/lib/db.client';
+import { clearAllFavorites } from '@/lib/db.client';
 import { getDoubanCategories } from '@/lib/douban.client';
 import { DoubanItem } from '@/lib/types';
 
 import CapsuleSwitch from '@/components/CapsuleSwitch';
 import ContinueWatching from '@/components/ContinueWatching';
+import { useFavoritesContext } from '@/components/FavoritesProvider';
 import PageLayout from '@/components/PageLayout';
+import { usePlayRecordsContext } from '@/components/PlayRecordsProvider';
 import ScrollableRow from '@/components/ScrollableRow';
 import { useSite } from '@/components/SiteProvider';
 import VideoCard from '@/components/VideoCard';
@@ -59,7 +55,39 @@ function HomeClient() {
     search_title?: string;
   };
 
-  const [favoriteItems, setFavoriteItems] = useState<FavoriteItem[]>([]);
+  const favoritesCtx = useFavoritesContext();
+  const playRecordsCtx = usePlayRecordsContext();
+
+  const favoriteItems = useMemo(() => {
+    if (!favoritesCtx?.ready) return [];
+
+    const playRecords = playRecordsCtx?.playRecords ?? {};
+
+    return Object.entries(favoritesCtx.favorites)
+      .sort(([, a], [, b]) => b.save_time - a.save_time)
+      .map(([key, fav]) => {
+        const plusIndex = key.indexOf('+');
+        const source = key.slice(0, plusIndex);
+        const id = key.slice(plusIndex + 1);
+        const playRecord = playRecords[key];
+
+        return {
+          id,
+          source,
+          title: fav.title,
+          year: fav.year,
+          poster: fav.cover,
+          episodes: fav.total_episodes,
+          source_name: fav.source_name,
+          currentEpisode: playRecord?.index,
+          search_title: fav.search_title,
+        } as FavoriteItem;
+      });
+  }, [
+    favoritesCtx?.favorites,
+    favoritesCtx?.ready,
+    playRecordsCtx?.playRecords,
+  ]);
 
   useEffect(() => {
     const fetchSection = async (
@@ -79,7 +107,6 @@ function HomeClient() {
       }
     };
 
-    // 分区独立加载：任一分区先返回即可先渲染，不再被最慢请求拖住
     void fetchSection(
       () =>
         getDoubanCategories({
@@ -101,59 +128,6 @@ function HomeClient() {
       setLoadingVariety
     );
   }, []);
-
-  // 处理收藏数据更新的函数
-  const updateFavoriteItems = async (allFavorites: Record<string, any>) => {
-    const allPlayRecords = await getAllPlayRecords();
-
-    // 根据保存时间排序（从近到远）
-    const sorted = Object.entries(allFavorites)
-      .sort(([, a], [, b]) => b.save_time - a.save_time)
-      .map(([key, fav]) => {
-        const plusIndex = key.indexOf('+');
-        const source = key.slice(0, plusIndex);
-        const id = key.slice(plusIndex + 1);
-
-        // 查找对应的播放记录，获取当前集数
-        const playRecord = allPlayRecords[key];
-        const currentEpisode = playRecord?.index;
-
-        return {
-          id,
-          source,
-          title: fav.title,
-          year: fav.year,
-          poster: fav.cover,
-          episodes: fav.total_episodes,
-          source_name: fav.source_name,
-          currentEpisode,
-          search_title: fav?.search_title,
-        } as FavoriteItem;
-      });
-    setFavoriteItems(sorted);
-  };
-
-  // 当切换到收藏夹时加载收藏数据
-  useEffect(() => {
-    if (activeTab !== 'favorites') return;
-
-    const loadFavorites = async () => {
-      const allFavorites = await getAllFavorites();
-      await updateFavoriteItems(allFavorites);
-    };
-
-    loadFavorites();
-
-    // 监听收藏更新事件
-    const unsubscribe = subscribeToDataUpdates(
-      'favoritesUpdated',
-      (newFavorites: Record<string, any>) => {
-        updateFavoriteItems(newFavorites);
-      }
-    );
-
-    return unsubscribe;
-  }, [activeTab]);
 
   const handleCloseAnnouncement = (announcement: string) => {
     setShowAnnouncement(false);
@@ -186,10 +160,7 @@ function HomeClient() {
                 {favoriteItems.length > 0 && (
                   <button
                     className='text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
-                    onClick={async () => {
-                      await clearAllFavorites();
-                      setFavoriteItems([]);
-                    }}
+                    onClick={() => clearAllFavorites()}
                   >
                     清空
                   </button>

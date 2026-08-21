@@ -23,6 +23,12 @@ const PROXY_PREFIX = '/api/proxy/video?url=';
 const SEGMENT_CONCURRENCY = 3;
 /** 单集分片上限，避免浏览器内存撑爆 */
 const MAX_SEGMENTS = 800;
+/** 单个分片的重试次数，抵御偶发网络抖动 */
+const SEGMENT_RETRIES = 2;
+/** 两次 a.click() 之间的间隔，避免浏览器把连续下载判定为弹窗滥用 */
+const DOWNLOAD_GAP_MS = 400;
+/** 转封装时每处理多少分片让出一次主线程 */
+const REMUX_YIELD_INTERVAL = 8;
 
 function report(
   onProgress: DownloadOptions['onProgress'],
@@ -94,6 +100,10 @@ async function fetchTextWithFallback(
   }
 }
 
+function isAbortError(err: unknown): boolean {
+  return (err as Error)?.name === 'AbortError';
+}
+
 async function fetchBufferWithMode(
   url: string,
   signal: AbortSignal | undefined,
@@ -104,9 +114,30 @@ async function fetchBufferWithMode(
   }
   try {
     return await fetchArrayBuffer(url, signal, false);
-  } catch {
+  } catch (err) {
+    if (isAbortError(err)) throw err;
     return fetchArrayBuffer(url, signal, true);
   }
+}
+
+async function fetchSegmentWithRetry(
+  url: string,
+  signal: AbortSignal | undefined,
+  viaProxy: boolean
+): Promise<ArrayBuffer> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= SEGMENT_RETRIES; attempt++) {
+    try {
+      return await fetchBufferWithMode(url, signal, viaProxy);
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      lastError = err;
+      if (attempt < SEGMENT_RETRIES) {
+        await delay(500 * 2 ** attempt, signal);
+      }
+    }
+  }
+  throw lastError;
 }
 
 function parseM3u8SegmentUrls(playlist: string, playlistUrl: string): string[] {
@@ -166,15 +197,16 @@ function withExtension(name: string, ext: string): string {
   return `${base}.${ext}`;
 }
 
-function concatUint8Arrays(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return merged;
+/** 可空分片数组，转封装时逐个置空以尽早释放内存 */
+type SegmentParts = (ArrayBuffer | null)[];
+
+function partsToBlob(parts: SegmentParts, type?: string): Blob {
+  const filled = parts.filter((part): part is ArrayBuffer => Boolean(part));
+  return type ? new Blob(filled, { type }) : new Blob(filled);
+}
+
+function yieldToMain(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -195,84 +227,96 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** 浏览器端 TS → MP4 转封装（不重新编码） */
-async function transmuxTsToMp4(
-  tsData: ArrayBuffer | Uint8Array,
-  signal?: AbortSignal
-): Promise<Uint8Array> {
-  if (signal?.aborted) {
-    throw new DOMException('下载已取消', 'AbortError');
+/**
+ * 浏览器端 TS → MP4 转封装（不重新编码）。
+ * 逐个分片推入并间歇让出主线程，避免大文件一次性 push 卡死 UI；
+ * 已推入的分片立即置空，降低内存峰值。
+ */
+async function transmuxToMp4Blob(
+  parts: SegmentParts,
+  signal: AbortSignal | undefined,
+  onProgress: DownloadOptions['onProgress']
+): Promise<Blob> {
+  const muxjs = await import('mux.js');
+  const transmuxer = new muxjs.mp4.Transmuxer();
+  const chunks: Uint8Array[] = [];
+
+  transmuxer.on('data', (segment) => {
+    if (segment.initSegment) {
+      chunks.push(segment.initSegment);
+    }
+    chunks.push(segment.data);
+  });
+
+  // 归档文件从 0 开始计时，否则输出会在开头多出一段空白
+  transmuxer.setBaseMediaDecodeTime(0);
+
+  const total = parts.length;
+  for (let i = 0; i < total; i++) {
+    if (signal?.aborted) {
+      throw new DOMException('下载已取消', 'AbortError');
+    }
+    const part = parts[i];
+    if (part) {
+      transmuxer.push(new Uint8Array(part));
+      parts[i] = null;
+    }
+    report(onProgress, {
+      phase: 'remux',
+      current: i + 1,
+      total,
+      message: `正在转封装 MP4 ${i + 1}/${total}`,
+    });
+    if (i % REMUX_YIELD_INTERVAL === REMUX_YIELD_INTERVAL - 1) {
+      await yieldToMain();
+    }
   }
 
-  const muxjs = await import('mux.js');
-  const Transmuxer = muxjs.mp4.Transmuxer;
+  transmuxer.flush();
 
-  return new Promise((resolve, reject) => {
-    const transmuxer = new Transmuxer();
-    const chunks: Uint8Array[] = [];
-
-    transmuxer.on('data', (segment) => {
-      if (segment.initSegment) {
-        chunks.push(segment.initSegment);
-      }
-      chunks.push(segment.data);
-    });
-
-    // 与 mux.js CLI 一致，避免字幕/ID3 时间偏移
-    transmuxer.setBaseMediaDecodeTime(90_000);
-
-    try {
-      const input =
-        tsData instanceof Uint8Array ? tsData : new Uint8Array(tsData);
-      transmuxer.push(input);
-      transmuxer.flush();
-
-      if (chunks.length === 0) {
-        reject(new Error('TS 转 MP4 失败：无有效媒体数据'));
-        return;
-      }
-      resolve(concatUint8Arrays(chunks));
-    } catch (err) {
-      reject(err);
-    }
-  });
+  if (chunks.length === 0) {
+    throw new Error('无有效媒体数据');
+  }
+  return new Blob(chunks, { type: 'video/mp4' });
 }
 
-/** 保存 TS，并尝试额外保存同名的 MP4（转封装失败时仍保留 TS） */
+/**
+ * 保存 TS，并尝试额外保存同名的 MP4。
+ * 转封装会消费（并清空）parts，失败时 TS 已落盘，不影响整体结果。
+ */
 async function saveTsAndMp4(
-  tsBlob: Blob,
+  parts: SegmentParts,
   filename: string,
   signal: AbortSignal | undefined,
   onProgress: DownloadOptions['onProgress']
 ) {
-  const tsName = withExtension(filename, 'ts');
-  triggerBrowserDownload(tsBlob, tsName);
+  triggerBrowserDownload(partsToBlob(parts), withExtension(filename, 'ts'));
 
   report(onProgress, {
     phase: 'remux',
     current: 0,
-    total: 1,
-    message: '正在转封装 MP4（保留 TS）...',
+    total: parts.length,
+    message: '正在转封装 MP4（TS 已保存）...',
   });
 
   try {
-    await delay(400, signal);
-    const mp4Data = await transmuxTsToMp4(await tsBlob.arrayBuffer(), signal);
-    const mp4Name = withExtension(filename, 'mp4');
-    triggerBrowserDownload(new Blob([mp4Data], { type: 'video/mp4' }), mp4Name);
+    await delay(DOWNLOAD_GAP_MS, signal);
+    const mp4Blob = await transmuxToMp4Blob(parts, signal, onProgress);
+    triggerBrowserDownload(mp4Blob, withExtension(filename, 'mp4'));
     report(onProgress, {
       phase: 'remux',
-      current: 1,
-      total: 1,
+      current: parts.length,
+      total: parts.length,
       message: '已保存 TS 与 MP4',
     });
   } catch (err) {
-    if ((err as Error)?.name === 'AbortError') throw err;
+    if (isAbortError(err)) throw err;
+    const reason = err instanceof Error ? err.message : '未知错误';
     report(onProgress, {
       phase: 'remux',
-      current: 1,
-      total: 1,
-      message: '已保存 TS（MP4 转封装失败）',
+      current: parts.length,
+      total: parts.length,
+      message: `已保存 TS（MP4 转封装失败：${reason}）`,
     });
   }
 }
@@ -310,7 +354,7 @@ async function downloadDirectFile(
   const ext = extMatch?.[1]?.toLowerCase() || 'mp4';
 
   if (ext === 'ts') {
-    await saveTsAndMp4(new Blob([buffer]), filename, signal, onProgress);
+    await saveTsAndMp4([buffer], filename, signal, onProgress);
     return;
   }
 
@@ -370,7 +414,7 @@ async function downloadHls(
   const initUrl = mapMatch ? resolveUrl(mediaPlaylistUrl, mapMatch[1]) : null;
 
   const total = segments.length + (initUrl ? 1 : 0);
-  const parts: ArrayBuffer[] = new Array(total);
+  const parts: SegmentParts = new Array(total).fill(null);
   let completed = 0;
 
   if (initUrl) {
@@ -380,7 +424,7 @@ async function downloadHls(
       total,
       message: '正在下载初始化分片...',
     });
-    parts[0] = await fetchBufferWithMode(initUrl, signal, viaProxy);
+    parts[0] = await fetchSegmentWithRetry(initUrl, signal, viaProxy);
     completed += 1;
     report(onProgress, {
       phase: 'segments',
@@ -390,20 +434,34 @@ async function downloadHls(
     });
   }
 
+  // 任一分片彻底失败时中止其余 worker，避免继续空耗流量与内存
+  const poolController = new AbortController();
+  const abortPool = () => poolController.abort();
+  if (signal) {
+    if (signal.aborted) abortPool();
+    else signal.addEventListener('abort', abortPool, { once: true });
+  }
+  let firstError: unknown = null;
+
   let cursor = 0;
   const offset = initUrl ? 1 : 0;
   const workers = Array.from(
     { length: Math.min(SEGMENT_CONCURRENCY, segments.length) },
     async () => {
-      while (!signal?.aborted) {
+      while (!poolController.signal.aborted) {
         const index = cursor++;
         if (index >= segments.length) return;
-        const buf = await fetchBufferWithMode(
-          segments[index],
-          signal,
-          viaProxy
-        );
-        parts[offset + index] = buf;
+        try {
+          parts[offset + index] = await fetchSegmentWithRetry(
+            segments[index],
+            poolController.signal,
+            viaProxy
+          );
+        } catch (err) {
+          if (!firstError && !signal?.aborted) firstError = err;
+          poolController.abort();
+          return;
+        }
         completed += 1;
         report(onProgress, {
           phase: 'segments',
@@ -416,8 +474,13 @@ async function downloadHls(
   );
 
   await Promise.all(workers);
+  signal?.removeEventListener('abort', abortPool);
+
   if (signal?.aborted) {
     throw new DOMException('下载已取消', 'AbortError');
+  }
+  if (firstError) {
+    throw firstError;
   }
 
   report(onProgress, {
@@ -428,16 +491,15 @@ async function downloadHls(
   });
 
   // fMP4 init + m4s → mp4；纯 TS 分片 → ts + mp4
-  const isFmp4 = Boolean(initUrl);
-  if (isFmp4) {
-    const finalName = filename.toLowerCase().endsWith('.mp4')
-      ? filename
-      : withExtension(filename, 'mp4');
-    triggerBrowserDownload(new Blob(parts), finalName);
+  if (initUrl) {
+    triggerBrowserDownload(
+      partsToBlob(parts, 'video/mp4'),
+      withExtension(filename, 'mp4')
+    );
     return;
   }
 
-  await saveTsAndMp4(new Blob(parts), filename, signal, onProgress);
+  await saveTsAndMp4(parts, filename, signal, onProgress);
 }
 
 /**

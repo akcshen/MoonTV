@@ -1,4 +1,5 @@
 import { API_CONFIG, ApiSite } from '@/lib/config';
+import { SHORT_DRAMA_GENRES } from '@/lib/shortdramaGenres';
 import { SearchResult } from '@/lib/types';
 import { cleanHtmlTags } from '@/lib/utils';
 import { yellowWords } from '@/lib/yellow';
@@ -25,6 +26,13 @@ const EXCLUDED_CATEGORY_WORDS = [
 const CATEGORY_CACHE_TTL = 6 * 60 * 60 * 1000;
 /** 单次聚合最多使用的资源站数量，避免请求过多拖慢首屏 */
 export const DEFAULT_SHORT_DRAMA_SOURCE_LIMIT = 6;
+/**
+ * 「全部」时单站最多请求的分类数。
+ * 有的站父分类是空壳（极速资源 t=38 返回 0，内容全在子分类里），
+ * 有的站父分类不完整（暴风资源父 12183 条、子分类合计 26053 条），
+ * 所以父子都要取，但要限制请求数量。
+ */
+const MAX_CATEGORIES_PER_SITE = 4;
 
 const CATEGORY_LIST_TIMEOUT = 5000;
 const VIDEO_LIST_TIMEOUT = 8000;
@@ -32,6 +40,14 @@ const VIDEO_LIST_TIMEOUT = 8000;
 interface ApiCategory {
   type_id: number | string;
   type_name: string;
+  type_pid?: number | string;
+}
+
+export interface ShortDramaCategories {
+  /** 「全部」使用的分类 id（父分类 + 子分类） */
+  allIds: string[];
+  /** 题材 label → 该站对应的分类 id */
+  genreIds: Record<string, string[]>;
 }
 
 interface ApiVideoItem {
@@ -63,13 +79,19 @@ export interface ShortDramaPage {
 
 const categoryCache = new Map<
   string,
-  { typeIds: string[]; expiresAt: number }
+  { categories: ShortDramaCategories; expiresAt: number }
 >();
 
-function isShortDramaCategory(name: string): boolean {
+/** 擦边/福利等分类，即便挂在短剧下也不展示 */
+function isBlockedCategory(name: string): boolean {
+  if (EXCLUDED_CATEGORY_WORDS.some((word) => name.includes(word))) return true;
+  return yellowWords.some((word) => name.includes(word));
+}
+
+/** 顶级短剧分类：名字含「短剧」且未被屏蔽 */
+function isShortDramaRootCategory(name: string): boolean {
   if (!SHORT_DRAMA_KEYWORDS.some((word) => name.includes(word))) return false;
-  if (EXCLUDED_CATEGORY_WORDS.some((word) => name.includes(word))) return false;
-  return !yellowWords.some((word) => name.includes(word));
+  return !isBlockedCategory(name);
 }
 
 async function fetchJson(
@@ -95,26 +117,63 @@ async function fetchJson(
   }
 }
 
-/** 探测资源站的短剧分类 id。各站分类 id 不一致，只能动态发现 */
-export async function getShortDramaTypeIds(
+function findGenreByAlias(categoryName: string): string | null {
+  const normalized = categoryName.trim();
+  const matched = SHORT_DRAMA_GENRES.find((genre) =>
+    genre.aliases.some((alias) => alias === normalized)
+  );
+  return matched?.label ?? null;
+}
+
+/**
+ * 探测资源站的短剧分类。各站分类 id 完全不一致（36/46/54/58…），
+ * 且题材子分类的名字不含「短剧」，只能靠 type_pid 关联。
+ */
+export async function getShortDramaCategories(
   apiSite: ApiSite
-): Promise<string[]> {
+): Promise<ShortDramaCategories> {
   const cached = categoryCache.get(apiSite.key);
   if (cached && cached.expiresAt > Date.now()) {
-    return cached.typeIds;
+    return cached.categories;
   }
 
   const data = await fetchJson(`${apiSite.api}?ac=list`, CATEGORY_LIST_TIMEOUT);
   const classes = (data?.class as ApiCategory[] | undefined) || [];
-  const typeIds = classes
-    .filter((item) => isShortDramaCategory(String(item?.type_name ?? '')))
-    .map((item) => String(item.type_id));
+
+  const roots = classes.filter((item) =>
+    isShortDramaRootCategory(String(item?.type_name ?? ''))
+  );
+  const rootIds = new Set(roots.map((item) => String(item.type_id)));
+
+  // 题材子分类名字里不含「短剧」，只能靠挂在短剧分类下识别
+  const children = classes.filter(
+    (item) =>
+      item?.type_pid != null &&
+      rootIds.has(String(item.type_pid)) &&
+      !rootIds.has(String(item.type_id)) &&
+      !isBlockedCategory(String(item?.type_name ?? ''))
+  );
+
+  const genreIds: Record<string, string[]> = {};
+  children.forEach((item) => {
+    const genre = findGenreByAlias(String(item.type_name ?? ''));
+    if (!genre) return;
+    genreIds[genre] = [...(genreIds[genre] || []), String(item.type_id)];
+  });
+
+  const categories: ShortDramaCategories = {
+    allIds: [
+      ...roots.map((item) => String(item.type_id)),
+      ...children.map((item) => String(item.type_id)),
+    ].slice(0, MAX_CATEGORIES_PER_SITE),
+    genreIds,
+  };
 
   categoryCache.set(apiSite.key, {
-    typeIds,
+    categories,
     expiresAt: Date.now() + CATEGORY_CACHE_TTL,
   });
-  return typeIds;
+  return categories;
 }
 
 function parseEpisodeCount(vodPlayUrl?: string): number {
@@ -149,17 +208,22 @@ function mapToShortDramaItem(
   };
 }
 
-/** 拉取单个资源站某一页的短剧。返回空数组表示该站没有短剧或请求失败 */
+/**
+ * 拉取单个资源站某一页的短剧。
+ * genre 为空表示「全部」；返回空数组表示该站没有对应内容或请求失败。
+ */
 export async function fetchShortDramaFromSite(
   apiSite: ApiSite,
-  page: number
+  page: number,
+  genre?: string
 ): Promise<ShortDramaPage> {
-  const typeIds = await getShortDramaTypeIds(apiSite);
+  const categories = await getShortDramaCategories(apiSite);
+  const typeIds = genre ? categories.genreIds[genre] || [] : categories.allIds;
   if (typeIds.length === 0) {
     return { items: [], hasMore: false };
   }
 
-  // t 参数不支持多值，逐个分类请求后合并
+  // t 参数不支持多值（实测 t=46,47 与 t=46 结果相同），逐个分类请求后合并
   const responses = await Promise.all(
     typeIds.map((typeId) =>
       fetchJson(
@@ -177,13 +241,12 @@ export async function fetchShortDramaFromSite(
   responses.forEach((data) => {
     if (!data) return;
     const list = (data.list as ApiVideoItem[] | undefined) || [];
-    const pageCount = Number(data.pagecount) || 0;
-    if (pageCount > page) hasMore = true;
+    if ((Number(data.pagecount) || 0) > page) hasMore = true;
 
     list.forEach((item) => {
       if (!item?.vod_id || !item?.vod_name) return;
-      const typeName = String(item.type_name || '');
-      if (typeName && !isShortDramaCategory(typeName)) return;
+      // 已按短剧分类 id 请求，这里只需挡掉擦边内容
+      if (isBlockedCategory(String(item.type_name || ''))) return;
       items.push(mapToShortDramaItem(item, apiSite));
     });
   });

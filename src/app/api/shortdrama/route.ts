@@ -4,10 +4,11 @@ import { getCacheTime, getConfig } from '@/lib/config';
 import {
   DEFAULT_SHORT_DRAMA_SOURCE_LIMIT,
   fetchShortDramaFromSite,
-  getShortDramaTypeIds,
+  getShortDramaCategories,
   mergeShortDramaItems,
   ShortDramaItem,
 } from '@/lib/shortdrama';
+import { findGenreByLabel } from '@/lib/shortdramaGenres';
 
 export const runtime = 'edge';
 
@@ -15,6 +16,9 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const page = Math.max(1, Number(searchParams.get('page')) || 1);
   const sourceKey = searchParams.get('source');
+  const requestedGenre = searchParams.get('genre') || '';
+  // 只接受已知题材，避免把任意值透传给资源站
+  const genre = findGenreByLabel(requestedGenre)?.label || '';
 
   const config = await getConfig();
   let apiSites = config.SourceConfig.filter((site) => !site.disabled);
@@ -29,12 +33,15 @@ export async function GET(request: Request) {
   }
 
   try {
-    // 先探测哪些源有短剧分类（结果带缓存），再只向这些源取数
+    // 先探测哪些源有对应分类（结果带缓存），再只向这些源取数
     const discovered = await Promise.allSettled(
-      apiSites.map(async (site) => ({
-        site,
-        typeIds: await getShortDramaTypeIds(site),
-      }))
+      apiSites.map(async (site) => {
+        const categories = await getShortDramaCategories(site);
+        const typeIds = genre
+          ? categories.genreIds[genre] || []
+          : categories.allIds;
+        return { site, typeIds };
+      })
     );
 
     const sitesWithShortDrama = discovered
@@ -62,7 +69,9 @@ export async function GET(request: Request) {
     }
 
     const settled = await Promise.allSettled(
-      sitesWithShortDrama.map((site) => fetchShortDramaFromSite(site, page))
+      sitesWithShortDrama.map((site) =>
+        fetchShortDramaFromSite(site, page, genre)
+      )
     );
 
     const groups: ShortDramaItem[][] = [];

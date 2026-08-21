@@ -4,9 +4,11 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { ShortDramaItem } from '@/lib/shortdrama';
 import { fetchShortDramaPage } from '@/lib/shortdrama.client';
+import { SHORT_DRAMA_GENRE_ALL } from '@/lib/shortdramaGenres';
 
 import DoubanCardSkeleton from '@/components/DoubanCardSkeleton';
 import PageLayout from '@/components/PageLayout';
+import ShortDramaSelector from '@/components/ShortDramaSelector';
 import VideoCard from '@/components/VideoCard';
 import VirtualizedCardGrid from '@/components/VirtualizedCardGrid';
 
@@ -19,6 +21,7 @@ function ShortDramaPageClient() {
   const [hasMore, setHasMore] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [genre, setGenre] = useState(SHORT_DRAMA_GENRE_ALL);
 
   const loadingRef = useRef<HTMLDivElement | null>(null);
   const seenKeysRef = useRef<Set<string>>(new Set());
@@ -47,7 +50,7 @@ function ShortDramaPageClient() {
       setIsLoadingMore(true);
     }
 
-    fetchShortDramaPage({ page, signal: controller.signal })
+    fetchShortDramaPage({ page, genre, signal: controller.signal })
       .then((data) => {
         if (controller.signal.aborted) return;
         if (isFirstPage) {
@@ -70,7 +73,25 @@ function ShortDramaPageClient() {
       });
 
     return () => controller.abort();
-  }, [page, appendItems]);
+  }, [page, genre, appendItems]);
+
+  const handleGenreChange = useCallback(
+    (next: string) => {
+      if (next === genre) return;
+      setGenre(next);
+      setLoading(true);
+      setHasMore(true);
+      // 切题材要回到第一页；page 已是 1 时 effect 不会重跑，需手动清空
+      setPage((prev) => {
+        if (prev === 1) {
+          seenKeysRef.current = new Set();
+          setItems([]);
+        }
+        return 1;
+      });
+    },
+    [genre]
+  );
 
   useEffect(() => {
     if (!hasMore || isLoadingMore || loading) return;
@@ -93,13 +114,22 @@ function ShortDramaPageClient() {
   return (
     <PageLayout activePath='/shortdrama'>
       <div className='px-4 sm:px-10 py-4 sm:py-8 overflow-visible'>
-        <div className='mb-6 sm:mb-8'>
-          <h1 className='text-2xl sm:text-3xl font-bold text-gray-800 mb-1 sm:mb-2 dark:text-gray-200'>
-            短剧
-          </h1>
-          <p className='text-sm sm:text-base text-gray-600 dark:text-gray-400'>
-            聚合各资源站的短剧更新，点击即可直接播放
-          </p>
+        <div className='mb-6 sm:mb-8 space-y-4 sm:space-y-6'>
+          <div>
+            <h1 className='text-2xl sm:text-3xl font-bold text-gray-800 mb-1 sm:mb-2 dark:text-gray-200'>
+              短剧
+            </h1>
+            <p className='text-sm sm:text-base text-gray-600 dark:text-gray-400'>
+              聚合各资源站的短剧更新，点击即可直接播放
+            </p>
+          </div>
+
+          <div className='bg-white/60 dark:bg-gray-800/40 rounded-2xl p-4 sm:p-6 border border-gray-200/30 dark:border-gray-700/30 backdrop-blur-sm'>
+            <ShortDramaSelector
+              activeGenre={genre}
+              onGenreChange={handleGenreChange}
+            />
+          </div>
         </div>
 
         <div className='max-w-[95%] mx-auto mt-8 overflow-visible'>

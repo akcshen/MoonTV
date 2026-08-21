@@ -94,13 +94,13 @@ function PlayPageClient() {
   // 卡顿恢复节流，避免频繁 seek
   const lastStallRecoveryRef = useRef(0);
 
-  // 去广告开关（从 localStorage 继承，默认 true）
+  // 去广告开关（从 localStorage 继承，默认 false）
   const [blockAdEnabled, setBlockAdEnabled] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
       const v = localStorage.getItem('enable_blockad');
       if (v !== null) return v === 'true';
     }
-    return true;
+    return false;
   });
   const blockAdEnabledRef = useRef(blockAdEnabled);
   useEffect(() => {

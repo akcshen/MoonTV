@@ -1025,12 +1025,17 @@ function PlayPageClient() {
   // ---------------------------------------------------------------------------
   // 处理全局快捷键
   const handleKeyboardShortcuts = (e: KeyboardEvent) => {
-    // 忽略输入框中的按键事件
+    // 忽略输入框（含可编辑元素）中的按键事件
+    const target = e.target as HTMLElement;
     if (
-      (e.target as HTMLElement).tagName === 'INPUT' ||
-      (e.target as HTMLElement).tagName === 'TEXTAREA'
+      target.tagName === 'INPUT' ||
+      target.tagName === 'TEXTAREA' ||
+      target.isContentEditable
     )
       return;
+
+    // 播放器处于锁定态时，屏蔽所有快捷键，避免误触
+    if (artPlayerRef.current?.isLock) return;
 
     // Alt + 左箭头 = 上一集
     if (e.altKey && e.key === 'ArrowLeft') {
@@ -1057,6 +1062,7 @@ function PlayPageClient() {
           0,
           artPlayerRef.current.currentTime - 15
         );
+        artPlayerRef.current.notice.show = '快退 15 秒';
         e.preventDefault();
       }
     }
@@ -1070,6 +1076,7 @@ function PlayPageClient() {
           duration > 0 ? duration : currentTime + 15,
           currentTime + 15
         );
+        artPlayerRef.current.notice.show = '快进 15 秒';
         e.preventDefault();
       }
     }
@@ -1767,6 +1774,7 @@ function PlayPageClient() {
       // 监听视频可播放事件，这时恢复播放进度更可靠
       artPlayerRef.current.on('video:canplay', () => {
         // 若存在需要恢复的播放进度，则跳转
+        let restoredTime: number | null = null;
         if (resumeTimeRef.current && resumeTimeRef.current > 0) {
           try {
             const duration = artPlayerRef.current.duration || 0;
@@ -1775,6 +1783,7 @@ function PlayPageClient() {
               target = Math.max(0, duration - 5);
             }
             artPlayerRef.current.currentTime = target;
+            restoredTime = target;
             console.log('成功恢复播放进度到:', resumeTimeRef.current);
           } catch (err) {
             console.warn('恢复播放进度失败:', err);
@@ -1796,7 +1805,11 @@ function PlayPageClient() {
           ) {
             artPlayerRef.current.playbackRate = lastPlaybackRateRef.current;
           }
-          artPlayerRef.current.notice.show = '';
+          // 恢复进度时给出提示，否则清空初始加载提示
+          artPlayerRef.current.notice.show =
+            restoredTime !== null && restoredTime > 1
+              ? `已恢复到上次播放位置 ${formatTime(restoredTime)}`
+              : '';
         }, 0);
 
         // 隐藏换源加载状态

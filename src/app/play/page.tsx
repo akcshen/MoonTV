@@ -176,6 +176,8 @@ function PlayPageClient() {
   // 用于记录是否需要在播放器 ready 后跳转到指定进度
   const resumeTimeRef = useRef<number | null>(null);
   const resumeReasonRef = useRef<'history' | 'source-switch' | null>(null);
+  // 最近一次有效播放进度，失败换源时避免被 0 覆盖
+  const lastGoodPlayTimeRef = useRef(0);
   // 上次使用的音量，默认 0.7
   const lastVolumeRef = useRef<number>(0.7);
   // 上次使用的播放速率，默认 1.0
@@ -878,6 +880,9 @@ function PlayPageClient() {
           // 保存待恢复的播放进度，待播放器就绪后跳转
           resumeTimeRef.current = targetTime;
           resumeReasonRef.current = 'history';
+          if (targetTime > 0) {
+            lastGoodPlayTimeRef.current = targetTime;
+          }
         }
       } catch (err) {
         console.error('读取播放记录失败:', err);
@@ -931,7 +936,13 @@ function PlayPageClient() {
       resetStallRecoveryState(stallRecoveryRef.current);
 
       // 换源前后各采一次时间，避免 await 期间进度溜走
-      let currentPlayTime = getAccuratePlaybackTime(artPlayerRef.current);
+      let currentPlayTime = Math.max(
+        getAccuratePlaybackTime(artPlayerRef.current),
+        lastGoodPlayTimeRef.current
+      );
+      if (currentPlayTime > 0) {
+        lastGoodPlayTimeRef.current = currentPlayTime;
+      }
       console.log('换源前当前播放时间:', currentPlayTime);
 
       // 清除前一个历史记录
@@ -977,15 +988,20 @@ function PlayPageClient() {
         targetIndex = 0;
       }
 
-      currentPlayTime =
-        getAccuratePlaybackTime(artPlayerRef.current) || currentPlayTime;
+      currentPlayTime = Math.max(
+        getAccuratePlaybackTime(artPlayerRef.current),
+        lastGoodPlayTimeRef.current,
+        currentPlayTime
+      );
 
       // 同一集换源：始终记下当前进度，新源 canplay 后再跳回去
       if (targetIndex !== currentEpisodeIndexRef.current) {
         resumeTimeRef.current = 0;
         resumeReasonRef.current = null;
+        lastGoodPlayTimeRef.current = 0;
       } else if (currentPlayTime > 0) {
         resumeTimeRef.current = currentPlayTime;
+        lastGoodPlayTimeRef.current = currentPlayTime;
         resumeReasonRef.current = 'source-switch';
       }
 
@@ -1029,6 +1045,7 @@ function PlayPageClient() {
       }
       setStallSwitchHint(false);
       resetStallRecoveryState(stallRecoveryRef.current);
+      lastGoodPlayTimeRef.current = 0;
       setCurrentEpisodeIndex(episodeNumber);
     }
   };
@@ -1042,6 +1059,7 @@ function PlayPageClient() {
       }
       setStallSwitchHint(false);
       resetStallRecoveryState(stallRecoveryRef.current);
+      lastGoodPlayTimeRef.current = 0;
       setCurrentEpisodeIndex(idx - 1);
     }
   };
@@ -1055,6 +1073,7 @@ function PlayPageClient() {
       }
       setStallSwitchHint(false);
       resetStallRecoveryState(stallRecoveryRef.current);
+      lastGoodPlayTimeRef.current = 0;
       setCurrentEpisodeIndex(idx + 1);
     }
   };
@@ -1568,8 +1587,11 @@ function PlayPageClient() {
             if (video.hls) {
               video.hls.destroy();
             }
+            const pendingResume = resumeTimeRef.current;
             const hls = new Hls({
               ...getHlsPlaybackOptions(),
+              startPosition:
+                pendingResume && pendingResume > 0 ? pendingResume : -1,
 
               /* 自定义loader */
               loader: blockAdEnabledRef.current
@@ -1796,16 +1818,25 @@ function PlayPageClient() {
         if (!pending || pending <= 0 || !artPlayerRef.current) {
           return null;
         }
+        const duration = artPlayerRef.current.duration;
+        // 新源尚未给出有效时长时不要清掉待恢复进度（失败源 canplay 会误伤）
+        if (!Number.isFinite(duration) || duration <= 1) {
+          return null;
+        }
         const reason = resumeReasonRef.current;
         try {
-          const duration = artPlayerRef.current.duration || 0;
           let target = pending;
-          if (duration && target >= duration - 2) {
+          if (target >= duration - 2) {
             target = Math.max(0, duration - 5);
           }
-          artPlayerRef.current.currentTime = target;
+          const alreadyClose =
+            Math.abs((artPlayerRef.current.currentTime || 0) - target) < 1.25;
+          if (!alreadyClose) {
+            artPlayerRef.current.currentTime = target;
+          }
           resumeTimeRef.current = null;
           resumeReasonRef.current = null;
+          lastGoodPlayTimeRef.current = target;
           console.log('成功恢复播放进度到:', target);
           return { target, reason };
         } catch (err) {
@@ -1854,16 +1885,25 @@ function PlayPageClient() {
         setIsVideoLoading(false);
       };
 
-      // 监听视频可播放事件，这时恢复播放进度更可靠
-      artPlayerRef.current.on('video:canplay', () => {
-        finishResumeNotice(applyPendingResume());
-      });
-      // switch 路径偶发不触发 canplay，用 loadedmetadata 兜底
-      artPlayerRef.current.on('video:loadedmetadata', () => {
+      const tryApplyResume = () => {
         const restored = applyPendingResume();
         if (restored) {
           finishResumeNotice(restored);
+          return;
         }
+        // 仍在等有效媒体时保持换源蒙层；否则正常关掉加载态
+        if (!resumeTimeRef.current) {
+          finishResumeNotice(null);
+        }
+      };
+
+      // 监听视频可播放事件，这时恢复播放进度更可靠
+      artPlayerRef.current.on('video:canplay', () => {
+        tryApplyResume();
+      });
+      // switch 路径偶发不触发 canplay，用 loadedmetadata 兜底
+      artPlayerRef.current.on('video:loadedmetadata', () => {
+        tryApplyResume();
       });
 
       // 监听视频时间更新：片头片尾跳过 + 临近结束预取下一集
@@ -1871,6 +1911,9 @@ function PlayPageClient() {
         const currentTime = artPlayerRef.current.currentTime || 0;
         const duration = artPlayerRef.current.duration || 0;
         const now = Date.now();
+        if (currentTime > 1 && duration > currentTime) {
+          lastGoodPlayTimeRef.current = currentTime;
+        }
 
         // 临近结束约 30 秒时预热下一集 m3u8，缩短连播等待
         if (

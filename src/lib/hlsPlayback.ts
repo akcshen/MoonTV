@@ -251,10 +251,12 @@ export function getAccuratePlaybackTime(
   } | null
 ): number {
   if (!player) return 0;
-  const fromVideo = player.video?.currentTime;
-  const t =
-    typeof fromVideo === 'number' && Number.isFinite(fromVideo)
-      ? fromVideo
-      : player.currentTime;
-  return typeof t === 'number' && Number.isFinite(t) && t > 0 ? t : 0;
+  const candidates = [player.video?.currentTime, player.currentTime];
+  let best = 0;
+  for (const t of candidates) {
+    if (typeof t === 'number' && Number.isFinite(t) && t > best) {
+      best = t;
+    }
+  }
+  return best;
 }

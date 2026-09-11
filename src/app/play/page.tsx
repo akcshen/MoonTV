@@ -20,13 +20,19 @@ import {
   subscribeToDataUpdates,
 } from '@/lib/db.client';
 import {
+  type HlsPlaybackSnapshot,
   applyStallRecoveryAction,
+  BUFFERING_SHOW_DELAY_MS,
   createStallRecoveryState,
+  dropHlsLevelOneStep,
+  emptyHlsPlaybackSnapshot,
   getAccuratePlaybackTime,
   getHlsPlaybackOptions,
   planStallRecovery,
+  readHlsPlaybackSnapshot,
   relaxStallLadder,
   resetStallRecoveryState,
+  resolveWeakNetStatus,
 } from '@/lib/hlsPlayback';
 import { loadVideoDownload } from '@/lib/lazyVideoDownload';
 import {
@@ -43,6 +49,7 @@ import type { DownloadProgress } from '@/lib/videoDownload';
 
 import EpisodeSelector from '@/components/EpisodeSelector';
 import PageLayout from '@/components/PageLayout';
+import PlaybackNetworkStatus from '@/components/PlaybackNetworkStatus';
 
 // 扩展 HTMLVideoElement 类型以支持 hls 属性
 declare global {
@@ -100,6 +107,17 @@ function PlayPageClient() {
   const stallRecoveryRef = useRef(createStallRecoveryState());
   const [stallSwitchHint, setStallSwitchHint] = useState(false);
   const [openSourcesTabSignal, setOpenSourcesTabSignal] = useState(0);
+  const waitingSinceRef = useRef<number | null>(null);
+  const lastStallAtRef = useRef<number | null>(null);
+  const bufferingTimerRef = useRef<any>(null);
+  const [weakNetTick, setWeakNetTick] = useState(0);
+  const [hlsSnapshot, setHlsSnapshot] = useState<HlsPlaybackSnapshot>(
+    emptyHlsPlaybackSnapshot
+  );
+  const stallSwitchHintRef = useRef(false);
+  useEffect(() => {
+    stallSwitchHintRef.current = stallSwitchHint;
+  }, [stallSwitchHint]);
 
   // 去广告开关（从 localStorage 继承，默认 false）
   const [blockAdEnabled, setBlockAdEnabled] = useState<boolean>(() => {
@@ -915,6 +933,58 @@ function PlayPageClient() {
     initSkipConfig();
   }, []);
 
+  const bumpWeakNetUi = () => setWeakNetTick((n) => n + 1);
+
+  const clearBufferingTimer = () => {
+    if (bufferingTimerRef.current != null) {
+      window.clearTimeout(bufferingTimerRef.current);
+      bufferingTimerRef.current = null;
+    }
+  };
+
+  const resetWeakNetFeedback = () => {
+    waitingSinceRef.current = null;
+    lastStallAtRef.current = null;
+    clearBufferingTimer();
+    setHlsSnapshot(emptyHlsPlaybackSnapshot);
+    bumpWeakNetUi();
+  };
+
+  const markPlaybackWaiting = () => {
+    if (waitingSinceRef.current != null) return;
+    waitingSinceRef.current = Date.now();
+    clearBufferingTimer();
+    bufferingTimerRef.current = window.setTimeout(() => {
+      bufferingTimerRef.current = null;
+      bumpWeakNetUi();
+    }, BUFFERING_SHOW_DELAY_MS);
+    bumpWeakNetUi();
+  };
+
+  const clearPlaybackWaiting = () => {
+    waitingSinceRef.current = null;
+    lastStallAtRef.current = null;
+    clearBufferingTimer();
+    bumpWeakNetUi();
+  };
+
+  const markStallRecoveryUi = (hls?: { currentLevel?: number } | null) => {
+    lastStallAtRef.current = Date.now();
+    if (waitingSinceRef.current == null) {
+      waitingSinceRef.current = Date.now();
+    }
+    clearBufferingTimer();
+    if (hls) {
+      setHlsSnapshot(readHlsPlaybackSnapshot(hls as any));
+    }
+    bumpWeakNetUi();
+  };
+
+  const refreshHlsSnapshot = (hls?: unknown) => {
+    if (!hls) return;
+    setHlsSnapshot(readHlsPlaybackSnapshot(hls as any));
+  };
+
   const handleOpenSourcesFromStall = () => {
     setStallSwitchHint(false);
     setIsEpisodeSelectorCollapsed(false);
@@ -924,6 +994,39 @@ function PlayPageClient() {
         .getElementById('play-episode-selector')
         ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
+  };
+
+  const handleDropPlaybackQuality = () => {
+    const hls = artPlayerRef.current?.video?.hls;
+    if (!hls) return;
+    const dropped = dropHlsLevelOneStep(hls);
+    const snap = readHlsPlaybackSnapshot(hls);
+    setHlsSnapshot(snap);
+    if (dropped && artPlayerRef.current) {
+      artPlayerRef.current.notice.show = snap.levelLabel
+        ? `已降低画质到 ${snap.levelLabel}`
+        : '已降低画质';
+    }
+  };
+
+  const handleRetryStallRecovery = () => {
+    const hls = artPlayerRef.current?.video?.hls;
+    if (!hls) return;
+    const plan = planStallRecovery(stallRecoveryRef.current);
+    try {
+      applyStallRecoveryAction(hls, plan.action ?? 'reload');
+    } catch (err) {
+      console.warn('手动卡顿恢复失败:', err);
+    }
+    if (plan.showHint && availableSourcesRef.current.length > 1) {
+      setStallSwitchHint(true);
+      if (artPlayerRef.current) {
+        artPlayerRef.current.notice.show = '播放多次卡顿，建议切换播放源';
+      }
+    } else if (artPlayerRef.current) {
+      artPlayerRef.current.notice.show = '正在尝试恢复播放';
+    }
+    markStallRecoveryUi(hls);
   };
 
   // 处理换源
@@ -938,6 +1041,7 @@ function PlayPageClient() {
       setIsVideoLoading(true);
       setStallSwitchHint(false);
       resetStallRecoveryState(stallRecoveryRef.current);
+      resetWeakNetFeedback();
 
       // 换源前后各采一次时间，避免 await 期间进度溜走
       let currentPlayTime = Math.max(
@@ -1049,6 +1153,7 @@ function PlayPageClient() {
       }
       setStallSwitchHint(false);
       resetStallRecoveryState(stallRecoveryRef.current);
+      resetWeakNetFeedback();
       lastGoodPlayTimeRef.current = 0;
       setCurrentEpisodeIndex(episodeNumber);
     }
@@ -1063,6 +1168,7 @@ function PlayPageClient() {
       }
       setStallSwitchHint(false);
       resetStallRecoveryState(stallRecoveryRef.current);
+      resetWeakNetFeedback();
       lastGoodPlayTimeRef.current = 0;
       setCurrentEpisodeIndex(idx - 1);
     }
@@ -1077,6 +1183,7 @@ function PlayPageClient() {
       }
       setStallSwitchHint(false);
       resetStallRecoveryState(stallRecoveryRef.current);
+      resetWeakNetFeedback();
       lastGoodPlayTimeRef.current = 0;
       setCurrentEpisodeIndex(idx + 1);
     }
@@ -1619,6 +1726,18 @@ function PlayPageClient() {
 
             ensureVideoSource(video, url);
 
+            hls.on(Hls.Events.LEVEL_SWITCHED, function () {
+              refreshHlsSnapshot(hls);
+            });
+            hls.on(Hls.Events.FRAG_LOADED, function () {
+              if (
+                waitingSinceRef.current != null ||
+                stallSwitchHintRef.current
+              ) {
+                refreshHlsSnapshot(hls);
+              }
+            });
+
             hls.on(Hls.Events.ERROR, function (_event: any, data: any) {
               // 缓冲卡顿 / 跳过空洞：先 reload/recover/降档，再小幅 seek
               if (
@@ -1632,6 +1751,7 @@ function PlayPageClient() {
                 } catch (err) {
                   console.warn('卡顿恢复失败:', err);
                 }
+                markStallRecoveryUi(hls);
                 if (plan.showHint && availableSourcesRef.current.length > 1) {
                   setStallSwitchHint(true);
                   if (artPlayerRef.current) {
@@ -1916,8 +2036,13 @@ function PlayPageClient() {
           setIsVideoLoading(false);
         }
       });
+      artPlayerRef.current.on('video:waiting', () => {
+        if (artPlayerRef.current?.paused) return;
+        markPlaybackWaiting();
+      });
       artPlayerRef.current.on('video:playing', () => {
         relaxStallLadder(stallRecoveryRef.current);
+        clearPlaybackWaiting();
         const restored = confirmPendingResume();
         if (restored) {
           finishResumeNotice(restored);
@@ -2057,6 +2182,10 @@ function PlayPageClient() {
   useEffect(() => {
     return () => {
       downloadAbortRef.current?.abort();
+      if (bufferingTimerRef.current != null) {
+        window.clearTimeout(bufferingTimerRef.current);
+        bufferingTimerRef.current = null;
+      }
       if (saveIntervalRef.current) {
         clearInterval(saveIntervalRef.current);
         saveIntervalRef.current = null;
@@ -2076,6 +2205,24 @@ function PlayPageClient() {
       prefetchedNextUrlRef.current = null;
     };
   }, []);
+
+  const currentSourceSpeedLabel = (() => {
+    const key = `${currentSource}-${currentId}`;
+    const info = precomputedVideoInfo.get(key);
+    if (!info) return null;
+    if (info.loadSpeed === '未知' || info.loadSpeed === '测量中...') {
+      return null;
+    }
+    return info.loadSpeed;
+  })();
+
+  // weakNetTick：waiting / stall ref 变化后强制按同一套规则重算状态条
+  const weakNetStatus = resolveWeakNetStatus({
+    waitingSince: waitingSinceRef.current,
+    lastStallAt: lastStallAtRef.current,
+    suggestSwitch: stallSwitchHint,
+    now: Date.now() + weakNetTick * 0,
+  });
 
   if (loading) {
     return (
@@ -2351,30 +2498,25 @@ function PlayPageClient() {
                   </div>
                 )}
 
-                {stallSwitchHint &&
-                  !isVideoLoading &&
-                  availableSources.length > 1 && (
-                    <div className='absolute left-3 right-3 bottom-16 z-[400] flex items-center gap-2 rounded-lg bg-black/80 px-3 py-2 text-sm text-white shadow-lg backdrop-blur-sm'>
-                      <p className='flex-1 leading-snug'>
-                        当前源频繁卡顿，建议切换播放源
-                      </p>
-                      <button
-                        type='button'
-                        onClick={handleOpenSourcesFromStall}
-                        className='flex-shrink-0 rounded-md bg-green-500 px-2.5 py-1 text-xs font-medium text-white hover:bg-green-600'
-                      >
-                        去换源
-                      </button>
-                      <button
-                        type='button'
-                        onClick={() => setStallSwitchHint(false)}
-                        className='flex-shrink-0 rounded-md px-1.5 py-1 text-white/70 hover:bg-white/10 hover:text-white'
-                        aria-label='关闭卡顿提示'
-                      >
-                        ×
-                      </button>
-                    </div>
-                  )}
+                {!isVideoLoading && weakNetStatus && (
+                  <PlaybackNetworkStatus
+                    kind={weakNetStatus}
+                    levelLabel={hlsSnapshot.levelLabel}
+                    bandwidthLabel={
+                      hlsSnapshot.bandwidthLabel || currentSourceSpeedLabel
+                    }
+                    canDropLevel={hlsSnapshot.canDropLevel}
+                    canSwitchSource={availableSources.length > 1}
+                    onDropLevel={handleDropPlaybackQuality}
+                    onSwitchSource={handleOpenSourcesFromStall}
+                    onRetry={handleRetryStallRecovery}
+                    onDismiss={
+                      weakNetStatus === 'suggest-switch'
+                        ? () => setStallSwitchHint(false)
+                        : undefined
+                    }
+                  />
+                )}
               </div>
             </div>
 

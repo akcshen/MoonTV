@@ -197,14 +197,59 @@ export function planStallRecovery(
   return { action, showHint };
 }
 
+export type HlsLevelLike = {
+  height?: number;
+  width?: number;
+  bitrate?: number;
+  name?: string;
+};
+
 type HlsLike = {
   startLoad: (startPosition?: number) => void;
   recoverMediaError: () => void;
   currentLevel: number;
   loadLevel: number;
   nextLoadLevel: number;
+  autoLevelCapping?: number;
+  bandwidthEstimate?: number;
+  levels?: HlsLevelLike[];
   media: HTMLMediaElement | null;
 };
+
+/** 弱网 / 卡顿条文案，与播放页快捷操作共用同一套状态。 */
+export type WeakNetStatusKind = 'buffering' | 'recovering' | 'suggest-switch';
+
+export const BUFFERING_SHOW_DELAY_MS = 1400;
+
+export const WEAK_NET_STATUS_LABEL: Record<WeakNetStatusKind, string> = {
+  buffering: '缓冲中',
+  recovering: '卡顿恢复中',
+  'suggest-switch': '建议换源',
+};
+
+export interface HlsPlaybackSnapshot {
+  levelLabel: string | null;
+  levelIndex: number;
+  levelCount: number;
+  canDropLevel: boolean;
+  bandwidthLabel: string | null;
+}
+
+export const emptyHlsPlaybackSnapshot: HlsPlaybackSnapshot = {
+  levelLabel: null,
+  levelIndex: -1,
+  levelCount: 0,
+  canDropLevel: false,
+  bandwidthLabel: null,
+};
+
+export interface WeakNetStatusInput {
+  waitingSince: number | null;
+  lastStallAt: number | null;
+  suggestSwitch: boolean;
+  now?: number;
+  showDelayMs?: number;
+}
 
 export function applyStallRecoveryAction(
   hls: HlsLike,
@@ -218,10 +263,7 @@ export function applyStallRecoveryAction(
       hls.recoverMediaError();
       break;
     case 'drop-level': {
-      const current = hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel;
-      if (current > 0) {
-        hls.nextLoadLevel = current - 1;
-      } else {
+      if (!dropHlsLevelOneStep(hls)) {
         hls.startLoad();
       }
       break;
@@ -259,4 +301,117 @@ export function getAccuratePlaybackTime(
     }
   }
   return best;
+}
+
+function resolveActiveLevelIndex(hls: HlsLike): number {
+  const current = hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel;
+  return Number.isFinite(current) ? current : -1;
+}
+
+/** 与测速结果同一套清晰度标签：4K / 2K / 1080p / 720p / 480p / SD。 */
+export function formatHlsLevelLabel(
+  level?: HlsLevelLike | null
+): string | null {
+  if (!level) return null;
+  const height = typeof level.height === 'number' ? level.height : 0;
+  const width = typeof level.width === 'number' ? level.width : 0;
+  if (height >= 2160 || width >= 3840) return '4K';
+  if (height >= 1440 || width >= 2560) return '2K';
+  if (height >= 1080 || width >= 1920) return '1080p';
+  if (height >= 720 || width >= 1280) return '720p';
+  if (height >= 480 || width >= 854) return '480p';
+  if (height > 0) return `${height}p`;
+  if (width > 0) return 'SD';
+  const name = typeof level.name === 'string' ? level.name.trim() : '';
+  if (name) return name;
+  if (typeof level.bitrate === 'number' && level.bitrate > 0) {
+    const kbps = Math.round(level.bitrate / 1000);
+    return kbps >= 1000 ? `${(kbps / 1000).toFixed(1)}Mbps` : `${kbps}kbps`;
+  }
+  return null;
+}
+
+/** hls.bandwidthEstimate 为 bit/s，展示为 KB/s 或 MB/s。 */
+export function formatBandwidthLabel(bps?: number | null): string | null {
+  if (typeof bps !== 'number' || !Number.isFinite(bps) || bps <= 0) {
+    return null;
+  }
+  const bytesPerSec = bps / 8;
+  if (bytesPerSec >= 1024 * 1024) {
+    return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s`;
+  }
+  if (bytesPerSec >= 1024) {
+    return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
+  }
+  return `${Math.max(1, Math.round(bytesPerSec))} KB/s`;
+}
+
+export function readHlsPlaybackSnapshot(
+  hls?: HlsLike | null
+): HlsPlaybackSnapshot {
+  if (!hls) return emptyHlsPlaybackSnapshot;
+  const levels = Array.isArray(hls.levels) ? hls.levels : [];
+  const index = resolveActiveLevelIndex(hls);
+  const level = index >= 0 && index < levels.length ? levels[index] : null;
+  const cap =
+    typeof hls.autoLevelCapping === 'number' ? hls.autoLevelCapping : -1;
+  const canDropLevel = levels.length > 1 && (index > 0 || cap > 0);
+
+  return {
+    levelLabel: formatHlsLevelLabel(level),
+    levelIndex: index,
+    levelCount: levels.length,
+    canDropLevel,
+    bandwidthLabel: formatBandwidthLabel(hls.bandwidthEstimate),
+  };
+}
+
+/**
+ * 强制降一档并封顶 ABR，避免弱网下立刻爬回高码率。
+ * 已是最低档时返回 false。
+ */
+export function dropHlsLevelOneStep(hls: HlsLike): boolean {
+  const levels = Array.isArray(hls.levels) ? hls.levels : [];
+  const current = resolveActiveLevelIndex(hls);
+  const cap =
+    typeof hls.autoLevelCapping === 'number' ? hls.autoLevelCapping : -1;
+  const baseline =
+    current > 0
+      ? current
+      : cap > 0
+      ? cap
+      : current < 0 && levels.length > 1
+      ? levels.length - 1
+      : 0;
+  if (baseline <= 0) return false;
+
+  const next = baseline - 1;
+  hls.autoLevelCapping = cap >= 0 ? Math.min(cap, next) : next;
+  hls.nextLoadLevel = next;
+  try {
+    hls.currentLevel = next;
+  } catch {
+    // currentLevel 在部分状态下只读，nextLoadLevel + capping 仍会生效
+  }
+  return true;
+}
+
+/**
+ * 决定播放器弱网条展示哪一种状态。
+ * 短等待不展示（避免细小空洞闪一下）；卡顿阶梯命中后立即显示「卡顿恢复中」；
+ * 多次卡顿提示与现有 hint 共用「建议换源」。
+ */
+export function resolveWeakNetStatus(
+  input: WeakNetStatusInput
+): WeakNetStatusKind | null {
+  if (input.suggestSwitch) return 'suggest-switch';
+
+  const now = input.now ?? Date.now();
+  if (input.waitingSince == null) return null;
+
+  if (input.lastStallAt != null) return 'recovering';
+
+  const delay = input.showDelayMs ?? BUFFERING_SHOW_DELAY_MS;
+  if (now - input.waitingSince >= delay) return 'buffering';
+  return null;
 }

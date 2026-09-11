@@ -70,7 +70,8 @@ const PlaybackNetworkStatus: React.FC<PlaybackNetworkStatusProps> = ({
     <div
       role='status'
       aria-live='polite'
-      className='absolute left-3 right-3 bottom-16 z-[400] rounded-lg bg-black/80 px-3 py-2 text-sm text-white shadow-lg backdrop-blur-sm'
+      data-testid='playback-network-status'
+      className='absolute left-3 right-3 bottom-16 z-[510] rounded-lg bg-black/80 px-3 py-2 text-sm text-white shadow-lg backdrop-blur-sm'
     >
       <div className='flex items-start gap-2'>
         <div className='min-w-0 flex-1'>

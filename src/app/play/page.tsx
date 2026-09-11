@@ -1044,6 +1044,11 @@ function PlayPageClient() {
     markStallRecoveryUi(hls);
   };
 
+  useEffect(() => {
+    if (!isVideoLoading) return;
+    markPlaybackWaiting();
+  }, [isVideoLoading]);
+
   // 处理换源
   const handleSourceChange = async (
     newSource: string,
@@ -2531,7 +2536,7 @@ function PlayPageClient() {
                   </div>
                 )}
 
-                {!isVideoLoading && weakNetStatus && (
+                {weakNetStatus && (
                   <PlaybackNetworkStatus
                     kind={weakNetStatus}
                     levelLabel={hlsSnapshot.levelLabel}

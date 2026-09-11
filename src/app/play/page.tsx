@@ -33,6 +33,7 @@ import {
   relaxStallLadder,
   resetStallRecoveryState,
   resolveWeakNetStatus,
+  STALL_RECOVERING_HOLD_MS,
 } from '@/lib/hlsPlayback';
 import { loadVideoDownload } from '@/lib/lazyVideoDownload';
 import {
@@ -110,6 +111,7 @@ function PlayPageClient() {
   const waitingSinceRef = useRef<number | null>(null);
   const lastStallAtRef = useRef<number | null>(null);
   const bufferingTimerRef = useRef<any>(null);
+  const recoveringHoldTimerRef = useRef<any>(null);
   const [weakNetTick, setWeakNetTick] = useState(0);
   const [hlsSnapshot, setHlsSnapshot] = useState<HlsPlaybackSnapshot>(
     emptyHlsPlaybackSnapshot
@@ -942,10 +944,18 @@ function PlayPageClient() {
     }
   };
 
+  const clearRecoveringHoldTimer = () => {
+    if (recoveringHoldTimerRef.current != null) {
+      window.clearTimeout(recoveringHoldTimerRef.current);
+      recoveringHoldTimerRef.current = null;
+    }
+  };
+
   const resetWeakNetFeedback = () => {
     waitingSinceRef.current = null;
     lastStallAtRef.current = null;
     clearBufferingTimer();
+    clearRecoveringHoldTimer();
     setHlsSnapshot(emptyHlsPlaybackSnapshot);
     bumpWeakNetUi();
   };
@@ -963,7 +973,6 @@ function PlayPageClient() {
 
   const clearPlaybackWaiting = () => {
     waitingSinceRef.current = null;
-    lastStallAtRef.current = null;
     clearBufferingTimer();
     bumpWeakNetUi();
   };
@@ -974,6 +983,12 @@ function PlayPageClient() {
       waitingSinceRef.current = Date.now();
     }
     clearBufferingTimer();
+    clearRecoveringHoldTimer();
+    recoveringHoldTimerRef.current = window.setTimeout(() => {
+      recoveringHoldTimerRef.current = null;
+      lastStallAtRef.current = null;
+      bumpWeakNetUi();
+    }, STALL_RECOVERING_HOLD_MS);
     if (hls) {
       setHlsSnapshot(readHlsPlaybackSnapshot(hls as any));
     }
@@ -2036,6 +2051,20 @@ function PlayPageClient() {
           setIsVideoLoading(false);
         }
       });
+      const media = artPlayerRef.current.video as HTMLVideoElement | undefined;
+      const onNativeWaiting = () => {
+        if (!media || media.paused) return;
+        markPlaybackWaiting();
+      };
+      const onNativePlaying = () => {
+        clearPlaybackWaiting();
+      };
+      if (media) {
+        media.addEventListener('waiting', onNativeWaiting);
+        media.addEventListener('stalled', onNativeWaiting);
+        media.addEventListener('playing', onNativePlaying);
+      }
+
       artPlayerRef.current.on('video:waiting', () => {
         if (artPlayerRef.current?.paused) return;
         markPlaybackWaiting();
@@ -2185,6 +2214,10 @@ function PlayPageClient() {
       if (bufferingTimerRef.current != null) {
         window.clearTimeout(bufferingTimerRef.current);
         bufferingTimerRef.current = null;
+      }
+      if (recoveringHoldTimerRef.current != null) {
+        window.clearTimeout(recoveringHoldTimerRef.current);
+        recoveringHoldTimerRef.current = null;
       }
       if (saveIntervalRef.current) {
         clearInterval(saveIntervalRef.current);

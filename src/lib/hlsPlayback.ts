@@ -220,6 +220,8 @@ type HlsLike = {
 export type WeakNetStatusKind = 'buffering' | 'recovering' | 'suggest-switch';
 
 export const BUFFERING_SHOW_DELAY_MS = 1400;
+/** 阶梯已动手后短暂保持「卡顿恢复中」，方便点到降画质 / 换源 / 重试。 */
+export const STALL_RECOVERING_HOLD_MS = 4500;
 
 export const WEAK_NET_STATUS_LABEL: Record<WeakNetStatusKind, string> = {
   buffering: '缓冲中',
@@ -249,6 +251,7 @@ export interface WeakNetStatusInput {
   suggestSwitch: boolean;
   now?: number;
   showDelayMs?: number;
+  holdMs?: number;
 }
 
 export function applyStallRecoveryAction(
@@ -407,9 +410,12 @@ export function resolveWeakNetStatus(
   if (input.suggestSwitch) return 'suggest-switch';
 
   const now = input.now ?? Date.now();
-  if (input.waitingSince == null) return null;
+  const hold = input.holdMs ?? STALL_RECOVERING_HOLD_MS;
+  const recoveringHold =
+    input.lastStallAt != null && now - input.lastStallAt < hold;
+  if (recoveringHold) return 'recovering';
 
-  if (input.lastStallAt != null) return 'recovering';
+  if (input.waitingSince == null) return null;
 
   const delay = input.showDelayMs ?? BUFFERING_SHOW_DELAY_MS;
   if (now - input.waitingSince >= delay) return 'buffering';

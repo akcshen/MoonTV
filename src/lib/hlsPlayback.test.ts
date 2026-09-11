@@ -8,6 +8,7 @@ import {
   planStallRecovery,
   readHlsPlaybackSnapshot,
   resolveWeakNetStatus,
+  STALL_RECOVERING_HOLD_MS,
 } from './hlsPlayback';
 
 function mockHls(overrides: Record<string, unknown> = {}) {
@@ -109,6 +110,25 @@ describe('resolveWeakNetStatus', () => {
         now: 5200,
       })
     ).toBe('recovering');
+  });
+
+  it('keeps recovering briefly after playback resumes so actions stay clickable', () => {
+    expect(
+      resolveWeakNetStatus({
+        waitingSince: null,
+        lastStallAt: 8000,
+        suggestSwitch: false,
+        now: 8000 + STALL_RECOVERING_HOLD_MS - 1,
+      })
+    ).toBe('recovering');
+    expect(
+      resolveWeakNetStatus({
+        waitingSince: null,
+        lastStallAt: 8000,
+        suggestSwitch: false,
+        now: 8000 + STALL_RECOVERING_HOLD_MS,
+      })
+    ).toBeNull();
   });
 
   it('keeps suggest-switch as the sticky stall-ladder hint', () => {

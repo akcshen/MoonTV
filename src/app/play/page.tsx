@@ -220,6 +220,10 @@ function PlayPageClient() {
 
   // 换源加载状态
   const [isVideoLoading, setIsVideoLoading] = useState(true);
+  const isVideoLoadingRef = useRef(true);
+  useEffect(() => {
+    isVideoLoadingRef.current = isVideoLoading;
+  }, [isVideoLoading]);
   const [videoLoadingStage, setVideoLoadingStage] = useState<
     'initing' | 'sourceChanging'
   >('initing');
@@ -1603,6 +1607,16 @@ function PlayPageClient() {
             hls.attachMedia(video);
             video.hls = hls;
 
+            if (pendingResume && pendingResume > 0) {
+              hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                try {
+                  hls.startLoad(pendingResume);
+                } catch (err) {
+                  console.warn('HLS startLoad 恢复进度失败:', err);
+                }
+              });
+            }
+
             ensureVideoSource(video, url);
 
             hls.on(Hls.Events.ERROR, function (_event: any, data: any) {
@@ -1809,17 +1823,27 @@ function PlayPageClient() {
       artPlayerRef.current.on('video:ratechange', () => {
         lastPlaybackRateRef.current = artPlayerRef.current.playbackRate;
       });
-      artPlayerRef.current.on('video:playing', () => {
-        relaxStallLadder(stallRecoveryRef.current);
-      });
 
-      const applyPendingResume = () => {
+      const seekToPendingResume = () => {
+        const pending = resumeTimeRef.current;
+        if (!pending || pending <= 0 || !artPlayerRef.current) return;
+        const duration = artPlayerRef.current.duration;
+        if (!Number.isFinite(duration) || duration <= 1) return;
+        let target = pending;
+        if (target >= duration - 2) {
+          target = Math.max(0, duration - 5);
+        }
+        if (Math.abs((artPlayerRef.current.currentTime || 0) - target) > 1.25) {
+          artPlayerRef.current.currentTime = target;
+        }
+      };
+
+      const confirmPendingResume = () => {
         const pending = resumeTimeRef.current;
         if (!pending || pending <= 0 || !artPlayerRef.current) {
           return null;
         }
         const duration = artPlayerRef.current.duration;
-        // 新源尚未给出有效时长时不要清掉待恢复进度（失败源 canplay 会误伤）
         if (!Number.isFinite(duration) || duration <= 1) {
           return null;
         }
@@ -1885,25 +1909,21 @@ function PlayPageClient() {
         setIsVideoLoading(false);
       };
 
-      const tryApplyResume = () => {
-        const restored = applyPendingResume();
+      // canplay 时先 seek，但失败源可能随后把时间打回 0，真正确认放在 playing
+      artPlayerRef.current.on('video:canplay', () => {
+        seekToPendingResume();
+        if (!resumeTimeRef.current) {
+          setIsVideoLoading(false);
+        }
+      });
+      artPlayerRef.current.on('video:playing', () => {
+        relaxStallLadder(stallRecoveryRef.current);
+        const restored = confirmPendingResume();
         if (restored) {
           finishResumeNotice(restored);
-          return;
+        } else if (!resumeTimeRef.current) {
+          setIsVideoLoading(false);
         }
-        // 仍在等有效媒体时保持换源蒙层；否则正常关掉加载态
-        if (!resumeTimeRef.current) {
-          finishResumeNotice(null);
-        }
-      };
-
-      // 监听视频可播放事件，这时恢复播放进度更可靠
-      artPlayerRef.current.on('video:canplay', () => {
-        tryApplyResume();
-      });
-      // switch 路径偶发不触发 canplay，用 loadedmetadata 兜底
-      artPlayerRef.current.on('video:loadedmetadata', () => {
-        tryApplyResume();
       });
 
       // 监听视频时间更新：片头片尾跳过 + 临近结束预取下一集
@@ -1911,7 +1931,12 @@ function PlayPageClient() {
         const currentTime = artPlayerRef.current.currentTime || 0;
         const duration = artPlayerRef.current.duration || 0;
         const now = Date.now();
-        if (currentTime > 1 && duration > currentTime) {
+        if (
+          !isVideoLoadingRef.current &&
+          !resumeTimeRef.current &&
+          currentTime > 1 &&
+          duration > currentTime
+        ) {
           lastGoodPlayTimeRef.current = currentTime;
         }
 

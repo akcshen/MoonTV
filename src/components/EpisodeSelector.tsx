@@ -45,6 +45,8 @@ interface EpisodeSelectorProps {
   sourceSearchError?: string | null;
   /** 预计算的测速结果，避免重复测速 */
   precomputedVideoInfo?: Map<string, VideoInfo>;
+  /** 递增时切到「换源」Tab，供播放器卡顿提示复用现有换源列表 */
+  openSourcesTabSignal?: number;
 }
 
 /**
@@ -63,6 +65,7 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
   sourceSearchLoading = false,
   sourceSearchError = null,
   precomputedVideoInfo,
+  openSourcesTabSignal = 0,
 }) => {
   const router = useRouter();
   const pageCount = Math.ceil(totalEpisodes / episodesPerPage);
@@ -274,6 +277,12 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
   const handleSourceTabClick = () => {
     setActiveTab('sources');
   };
+
+  useEffect(() => {
+    if (openSourcesTabSignal && openSourcesTabSignal > 0) {
+      setActiveTab('sources');
+    }
+  }, [openSourcesTabSignal]);
 
   const handleCategoryClick = useCallback(
     (index: number) => {

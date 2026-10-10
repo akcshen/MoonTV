@@ -6,6 +6,11 @@ import { Heart } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useRef, useState } from 'react';
 
+import { attachHlsPlayback, ensureVideoSource } from '@/lib/attachHlsPlayback';
+import {
+  AUTO_FAILOVER_COOLDOWN_MS,
+  pickNextFailoverSource,
+} from '@/lib/autoSourceFailover';
 import {
   deleteFavorite,
   deletePlayRecord,
@@ -27,7 +32,6 @@ import {
   dropHlsLevelOneStep,
   emptyHlsPlaybackSnapshot,
   getAccuratePlaybackTime,
-  getHlsPlaybackOptions,
   planStallRecovery,
   readHlsPlaybackSnapshot,
   relaxStallLadder,
@@ -37,9 +41,20 @@ import {
 } from '@/lib/hlsPlayback';
 import { loadVideoDownload } from '@/lib/lazyVideoDownload';
 import {
+  AUTO_SOURCE_FAILOVER_EVENT,
+  readAutoSourceFailoverEnabled,
+  readBlockAdEnabled,
+  readOptimizationEnabled,
+  writeAutoSourceFailoverEnabled,
+} from '@/lib/playbackPreferences';
+import {
   filterResultsByTitle,
   searchSourcesProgressive,
 } from '@/lib/progressiveSearch';
+import {
+  type SourceProbeResult,
+  preferBestSource,
+} from '@/lib/sourcePreference';
 import { SearchResult } from '@/lib/types';
 import {
   DEFAULT_POSTER,
@@ -121,14 +136,37 @@ function PlayPageClient() {
     stallSwitchHintRef.current = stallSwitchHint;
   }, [stallSwitchHint]);
 
-  // 去广告开关（从 localStorage 继承，默认 false）
-  const [blockAdEnabled, setBlockAdEnabled] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      const v = localStorage.getItem('enable_blockad');
-      if (v !== null) return v === 'true';
-    }
-    return false;
+  // 自动换源（默认关）。skipped 只记录本集已经自动放弃的源。
+  const [autoFailoverEnabled, setAutoFailoverEnabled] = useState(false);
+  const failoverSkippedRef = useRef<Set<string>>(new Set());
+  const lastAutoFailoverAtRef = useRef(0);
+  const autoFailoverInFlightRef = useRef(false);
+  const handleSourceChangeRef = useRef<
+    (
+      newSource: string,
+      newId: string,
+      newTitle: string,
+      options?: { auto?: boolean }
+    ) => Promise<void>
+  >(async () => {
+    /* assigned after handleSourceChange is created */
   });
+
+  useEffect(() => {
+    setAutoFailoverEnabled(readAutoSourceFailoverEnabled());
+    const sync = () => setAutoFailoverEnabled(readAutoSourceFailoverEnabled());
+    window.addEventListener(AUTO_SOURCE_FAILOVER_EVENT, sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener(AUTO_SOURCE_FAILOVER_EVENT, sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
+
+  // 去广告开关（从 localStorage 继承，默认 false）
+  const [blockAdEnabled, setBlockAdEnabled] = useState<boolean>(() =>
+    readBlockAdEnabled()
+  );
   const blockAdEnabledRef = useRef(blockAdEnabled);
   useEffect(() => {
     blockAdEnabledRef.current = blockAdEnabled;
@@ -206,33 +244,23 @@ function PlayPageClient() {
   // 换源相关状态
   const [availableSources, setAvailableSources] = useState<SearchResult[]>([]);
   const availableSourcesRef = useRef<SearchResult[]>([]);
-  useEffect(() => {
-    availableSourcesRef.current = availableSources;
-  }, [availableSources]);
+  availableSourcesRef.current = availableSources;
   const [sourceSearchLoading, setSourceSearchLoading] = useState(false);
   const [sourceSearchError, setSourceSearchError] = useState<string | null>(
     null
   );
 
   // 优选和测速开关
-  const [optimizationEnabled] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('enableOptimization');
-      if (saved !== null) {
-        try {
-          return JSON.parse(saved);
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-    return true;
-  });
+  const [optimizationEnabled] = useState<boolean>(() =>
+    readOptimizationEnabled()
+  );
 
   // 保存优选时的测速结果，避免EpisodeSelector重复测速
   const [precomputedVideoInfo, setPrecomputedVideoInfo] = useState<
-    Map<string, { quality: string; loadSpeed: string; pingTime: number }>
+    Map<string, SourceProbeResult>
   >(new Map());
+  const precomputedVideoInfoRef = useRef(precomputedVideoInfo);
+  precomputedVideoInfoRef.current = precomputedVideoInfo;
 
   // 折叠状态（仅在 lg 及以上屏幕有效）
   const [isEpisodeSelectorCollapsed, setIsEpisodeSelectorCollapsed] =
@@ -298,207 +326,6 @@ function PlayPageClient() {
   // 工具函数（Utils）
   // -----------------------------------------------------------------------------
 
-  // 播放源优选函数：限制测速数量，降低移动端压力
-  const preferBestSource = async (
-    sources: SearchResult[]
-  ): Promise<SearchResult> => {
-    if (sources.length === 1) return sources[0];
-
-    // 最多测速前 6 个源，避免一次性创建过多 HLS 实例
-    const candidates = sources.slice(0, 6);
-    const batchSize = Math.min(3, candidates.length);
-    const allResults: Array<{
-      source: SearchResult;
-      testResult: { quality: string; loadSpeed: string; pingTime: number };
-    } | null> = [];
-
-    for (let start = 0; start < candidates.length; start += batchSize) {
-      const batchSources = candidates.slice(start, start + batchSize);
-      const batchResults = await Promise.all(
-        batchSources.map(async (source) => {
-          try {
-            // 检查是否有第一集的播放地址
-            if (!source.episodes || source.episodes.length === 0) {
-              console.warn(`播放源 ${source.source_name} 没有可用的播放地址`);
-              return null;
-            }
-
-            const episodeUrl =
-              source.episodes.length > 1
-                ? source.episodes[1]
-                : source.episodes[0];
-            const testResult = await getVideoResolutionFromM3u8(episodeUrl);
-
-            return {
-              source,
-              testResult,
-            };
-          } catch (error) {
-            return null;
-          }
-        })
-      );
-      allResults.push(...batchResults);
-    }
-
-    // 等待所有测速完成，包含成功和失败的结果
-    // 保存所有测速结果到 precomputedVideoInfo，供 EpisodeSelector 使用（包含错误结果）
-    const newVideoInfoMap = new Map<
-      string,
-      {
-        quality: string;
-        loadSpeed: string;
-        pingTime: number;
-        hasError?: boolean;
-      }
-    >();
-    allResults.forEach((result, index) => {
-      const source = result?.source || candidates[index];
-      if (!source) return;
-      const sourceKey = `${source.source}-${source.id}`;
-
-      if (result) {
-        // 成功的结果
-        newVideoInfoMap.set(sourceKey, result.testResult);
-      }
-    });
-
-    // 过滤出成功的结果用于优选计算
-    const successfulResults = allResults.filter(Boolean) as Array<{
-      source: SearchResult;
-      testResult: { quality: string; loadSpeed: string; pingTime: number };
-    }>;
-
-    setPrecomputedVideoInfo(newVideoInfoMap);
-
-    if (successfulResults.length === 0) {
-      console.warn('所有播放源测速都失败，使用第一个播放源');
-      return sources[0];
-    }
-
-    // 找出所有有效速度的最大值，用于线性映射
-    const validSpeeds = successfulResults
-      .map((result) => {
-        const speedStr = result.testResult.loadSpeed;
-        if (speedStr === '未知' || speedStr === '测量中...') return 0;
-
-        const match = speedStr.match(/^([\d.]+)\s*(KB\/s|MB\/s)$/);
-        if (!match) return 0;
-
-        const value = parseFloat(match[1]);
-        const unit = match[2];
-        return unit === 'MB/s' ? value * 1024 : value; // 统一转换为 KB/s
-      })
-      .filter((speed) => speed > 0);
-
-    const maxSpeed = validSpeeds.length > 0 ? Math.max(...validSpeeds) : 1024; // 默认1MB/s作为基准
-
-    // 找出所有有效延迟的最小值和最大值，用于线性映射
-    const validPings = successfulResults
-      .map((result) => result.testResult.pingTime)
-      .filter((ping) => ping > 0);
-
-    const minPing = validPings.length > 0 ? Math.min(...validPings) : 50;
-    const maxPing = validPings.length > 0 ? Math.max(...validPings) : 1000;
-
-    // 计算每个结果的评分
-    const resultsWithScore = successfulResults.map((result) => ({
-      ...result,
-      score: calculateSourceScore(
-        result.testResult,
-        maxSpeed,
-        minPing,
-        maxPing
-      ),
-    }));
-
-    // 按综合评分排序，选择最佳播放源
-    resultsWithScore.sort((a, b) => b.score - a.score);
-
-    console.log('播放源评分排序结果:');
-    resultsWithScore.forEach((result, index) => {
-      console.log(
-        `${index + 1}. ${
-          result.source.source_name
-        } - 评分: ${result.score.toFixed(2)} (${result.testResult.quality}, ${
-          result.testResult.loadSpeed
-        }, ${result.testResult.pingTime}ms)`
-      );
-    });
-
-    return resultsWithScore[0].source;
-  };
-
-  // 计算播放源综合评分
-  const calculateSourceScore = (
-    testResult: {
-      quality: string;
-      loadSpeed: string;
-      pingTime: number;
-    },
-    maxSpeed: number,
-    minPing: number,
-    maxPing: number
-  ): number => {
-    let score = 0;
-
-    // 分辨率评分 (40% 权重)
-    const qualityScore = (() => {
-      switch (testResult.quality) {
-        case '4K':
-          return 100;
-        case '2K':
-          return 85;
-        case '1080p':
-          return 75;
-        case '720p':
-          return 60;
-        case '480p':
-          return 40;
-        case 'SD':
-          return 20;
-        default:
-          return 0;
-      }
-    })();
-    score += qualityScore * 0.4;
-
-    // 下载速度评分 (40% 权重) - 基于最大速度线性映射
-    const speedScore = (() => {
-      const speedStr = testResult.loadSpeed;
-      if (speedStr === '未知' || speedStr === '测量中...') return 30;
-
-      // 解析速度值
-      const match = speedStr.match(/^([\d.]+)\s*(KB\/s|MB\/s)$/);
-      if (!match) return 30;
-
-      const value = parseFloat(match[1]);
-      const unit = match[2];
-      const speedKBps = unit === 'MB/s' ? value * 1024 : value;
-
-      // 基于最大速度线性映射，最高100分
-      const speedRatio = speedKBps / maxSpeed;
-      return Math.min(100, Math.max(0, speedRatio * 100));
-    })();
-    score += speedScore * 0.4;
-
-    // 网络延迟评分 (20% 权重) - 基于延迟范围线性映射
-    const pingScore = (() => {
-      const ping = testResult.pingTime;
-      if (ping <= 0) return 0; // 无效延迟给默认分
-
-      // 如果所有延迟都相同，给满分
-      if (maxPing === minPing) return 100;
-
-      // 线性映射：最低延迟=100分，最高延迟=0分
-      const pingRatio = (maxPing - ping) / (maxPing - minPing);
-      return Math.min(100, Math.max(0, pingRatio * 100));
-    })();
-    score += pingScore * 0.2;
-
-    return Math.round(score * 100) / 100; // 保留两位小数
-  };
-
   // 更新视频地址
   const updateVideoUrl = (
     detailData: SearchResult | null,
@@ -517,83 +344,6 @@ function PlayPageClient() {
       setVideoUrl(newUrl);
     }
   };
-
-  const ensureVideoSource = (video: HTMLVideoElement | null, url: string) => {
-    if (!video || !url) return;
-    const sources = Array.from(video.getElementsByTagName('source'));
-    const existed = sources.some((s) => s.src === url);
-    if (!existed) {
-      // 移除旧的 source，保持唯一
-      sources.forEach((s) => s.remove());
-      const sourceEl = document.createElement('source');
-      sourceEl.src = url;
-      video.appendChild(sourceEl);
-    }
-
-    // 始终允许远程播放（AirPlay / Cast）
-    video.disableRemotePlayback = false;
-    // 如果曾经有禁用属性，移除之
-    if (video.hasAttribute('disableRemotePlayback')) {
-      video.removeAttribute('disableRemotePlayback');
-    }
-  };
-
-  // 去广告相关函数：移除插入点标记，并尽量丢掉明显的短广告分片
-  function filterAdsFromM3U8(m3u8Content: string): string {
-    if (!m3u8Content) return '';
-
-    const lines = m3u8Content.split('\n');
-    const durations: number[] = [];
-    for (const line of lines) {
-      if (line.startsWith('#EXTINF:')) {
-        const duration = parseFloat(line.slice(8));
-        if (!Number.isNaN(duration)) durations.push(duration);
-      }
-    }
-
-    const sorted = [...durations].sort((a, b) => a - b);
-    const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 10;
-    // 相对正常分片明显偏短的片段，更可能是插播广告
-    const adDurationThreshold = Math.min(3, median * 0.35);
-
-    const filteredLines: string[] = [];
-    let skipNextUri = false;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-
-      // 去掉不连续标记，避免广告插入点打断播放
-      if (line.includes('#EXT-X-DISCONTINUITY')) {
-        continue;
-      }
-
-      if (line.startsWith('#EXTINF:')) {
-        const duration = parseFloat(line.slice(8));
-        if (
-          !Number.isNaN(duration) &&
-          median >= 5 &&
-          duration > 0 &&
-          duration < adDurationThreshold
-        ) {
-          skipNextUri = true;
-          continue;
-        }
-        filteredLines.push(line);
-        continue;
-      }
-
-      // 跳过紧随被过滤 EXTINF 之后的分片 URI
-      if (skipNextUri && line.trim() && !line.startsWith('#')) {
-        skipNextUri = false;
-        continue;
-      }
-
-      skipNextUri = false;
-      filteredLines.push(line);
-    }
-
-    return filteredLines.join('\n');
-  }
 
   // 跳过片头片尾配置相关函数
   const handleSkipConfigChange = async (newConfig: {
@@ -696,8 +446,6 @@ function PlayPageClient() {
         .padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
     }
   };
-
-  // CustomHlsJsLoader 在播放器初始化时基于已加载的 Hls 动态创建
 
   // 当集数索引变化时自动更新视频地址
   useEffect(() => {
@@ -837,7 +585,12 @@ function PlayPageClient() {
           setLoadingStage('preferring');
           setLoadingMessage('⚡ 正在优选最佳播放源...');
 
-          detailData = await preferBestSource(sourcesInfo);
+          const preferred = await preferBestSource(
+            sourcesInfo,
+            getVideoResolutionFromM3u8
+          );
+          setPrecomputedVideoInfo(preferred.videoInfo);
+          detailData = preferred.best;
         }
       }
 
@@ -1024,6 +777,59 @@ function PlayPageClient() {
     }
   };
 
+  const tryAutoSourceFailover = (): boolean => {
+    if (!readAutoSourceFailoverEnabled()) return false;
+    if (autoFailoverInFlightRef.current) return true;
+    const now = Date.now();
+    // 冷却期内不再连切，交给现有的「建议换源」手动提示。
+    if (now - lastAutoFailoverAtRef.current < AUTO_FAILOVER_COOLDOWN_MS) {
+      return false;
+    }
+
+    const sources = availableSourcesRef.current;
+    if (sources.length < 2) return false;
+    const next = pickNextFailoverSource({
+      sources,
+      currentSource: currentSourceRef.current,
+      currentId: currentIdRef.current,
+      episodeIndex: currentEpisodeIndexRef.current,
+      videoInfo: precomputedVideoInfoRef.current,
+      skippedKeys: failoverSkippedRef.current,
+    });
+    if (!next) return false;
+
+    failoverSkippedRef.current.add(
+      `${currentSourceRef.current}-${currentIdRef.current}`
+    );
+    lastAutoFailoverAtRef.current = now;
+    if (artPlayerRef.current) {
+      artPlayerRef.current.notice.show = `播放多次卡顿，正在自动切换到 ${next.source_name}`;
+    }
+    void handleSourceChangeRef.current(next.source, next.id, next.title, {
+      auto: true,
+    });
+    return true;
+  };
+  const tryAutoSourceFailoverRef = useRef(tryAutoSourceFailover);
+  tryAutoSourceFailoverRef.current = tryAutoSourceFailover;
+
+  const noteSuggestSwitch = () => {
+    if (tryAutoSourceFailover()) return;
+    setStallSwitchHint(true);
+    if (artPlayerRef.current) {
+      artPlayerRef.current.notice.show = '播放多次卡顿，建议切换播放源';
+    }
+  };
+
+  const handleToggleAutoFailover = () => {
+    const next = !readAutoSourceFailoverEnabled();
+    writeAutoSourceFailoverEnabled(next);
+    setAutoFailoverEnabled(next);
+    if (next) {
+      tryAutoSourceFailover();
+    }
+  };
+
   const handleRetryStallRecovery = () => {
     const hls = artPlayerRef.current?.video?.hls;
     if (!hls) return;
@@ -1034,10 +840,7 @@ function PlayPageClient() {
       console.warn('手动卡顿恢复失败:', err);
     }
     if (plan.showHint && availableSourcesRef.current.length > 1) {
-      setStallSwitchHint(true);
-      if (artPlayerRef.current) {
-        artPlayerRef.current.notice.show = '播放多次卡顿，建议切换播放源';
-      }
+      noteSuggestSwitch();
     } else if (artPlayerRef.current) {
       artPlayerRef.current.notice.show = '正在尝试恢复播放';
     }
@@ -1053,8 +856,13 @@ function PlayPageClient() {
   const handleSourceChange = async (
     newSource: string,
     newId: string,
-    newTitle: string
+    newTitle: string,
+    options?: { auto?: boolean }
   ) => {
+    if (!options?.auto) {
+      failoverSkippedRef.current = new Set();
+    }
+    autoFailoverInFlightRef.current = true;
     try {
       // 显示换源加载状态
       setVideoLoadingStage('sourceChanging');
@@ -1099,7 +907,7 @@ function PlayPageClient() {
         }
       }
 
-      const newDetail = availableSources.find(
+      const newDetail = availableSourcesRef.current.find(
         (source) => source.source === newSource && source.id === newId
       );
       if (!newDetail) {
@@ -1151,8 +959,11 @@ function PlayPageClient() {
       // 隐藏换源加载状态
       setIsVideoLoading(false);
       setError(err instanceof Error ? err.message : '换源失败');
+    } finally {
+      autoFailoverInFlightRef.current = false;
     }
   };
+  handleSourceChangeRef.current = handleSourceChange;
 
   useEffect(() => {
     document.addEventListener('keydown', handleKeyboardShortcuts);
@@ -1160,6 +971,11 @@ function PlayPageClient() {
       document.removeEventListener('keydown', handleKeyboardShortcuts);
     };
   }, []);
+
+  // 换集后允许重新考虑刚才放弃的源
+  useEffect(() => {
+    failoverSkippedRef.current = new Set();
+  }, [currentEpisodeIndex]);
 
   // ---------------------------------------------------------------------------
   // 集数切换
@@ -1638,37 +1454,6 @@ function PlayPageClient() {
     }
 
     try {
-      // 基于已加载的 Hls 创建去广告 Loader
-      class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
-        constructor(config: any) {
-          super(config);
-          const load = this.load.bind(this);
-          this.load = function (context: any, config: any, callbacks: any) {
-            // 拦截manifest和level请求
-            if (
-              (context as any).type === 'manifest' ||
-              (context as any).type === 'level'
-            ) {
-              const onSuccess = callbacks.onSuccess;
-              callbacks.onSuccess = function (
-                response: any,
-                stats: any,
-                context: any
-              ) {
-                // 如果是m3u8文件，处理内容以移除广告分段
-                if (response.data && typeof response.data === 'string') {
-                  // 过滤掉广告段 - 实现更精确的广告过滤逻辑
-                  response.data = filterAdsFromM3U8(response.data);
-                }
-                return onSuccess(response, stats, context, null);
-              };
-            }
-            // 执行原始load方法
-            load(context, config, callbacks);
-          };
-        }
-      }
-
       // 创建新的播放器实例
       Artplayer.PLAYBACK_RATE = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
       Artplayer.USE_RAF = true;
@@ -1715,55 +1500,25 @@ function PlayPageClient() {
               return;
             }
 
-            if (video.hls) {
-              video.hls.destroy();
-            }
             const pendingResume = resumeTimeRef.current;
-            const hls = new Hls({
-              ...getHlsPlaybackOptions(),
+            attachHlsPlayback({
+              Hls,
+              video,
+              url,
+              blockAds: blockAdEnabledRef.current,
               startPosition:
                 pendingResume && pendingResume > 0 ? pendingResume : -1,
-
-              /* 自定义loader */
-              loader: blockAdEnabledRef.current
-                ? CustomHlsJsLoader
-                : Hls.DefaultConfig.loader,
-            });
-
-            hls.loadSource(url);
-            hls.attachMedia(video);
-            video.hls = hls;
-
-            if (pendingResume && pendingResume > 0) {
-              hls.on(Hls.Events.MANIFEST_PARSED, function () {
-                try {
-                  hls.startLoad(pendingResume);
-                } catch (err) {
-                  console.warn('HLS startLoad 恢复进度失败:', err);
+              onLevelSwitched: (hls) => refreshHlsSnapshot(hls),
+              onFragLoaded: (hls) => {
+                if (
+                  waitingSinceRef.current != null ||
+                  stallSwitchHintRef.current
+                ) {
+                  refreshHlsSnapshot(hls);
                 }
-              });
-            }
-
-            ensureVideoSource(video, url);
-
-            hls.on(Hls.Events.LEVEL_SWITCHED, function () {
-              refreshHlsSnapshot(hls);
-            });
-            hls.on(Hls.Events.FRAG_LOADED, function () {
-              if (
-                waitingSinceRef.current != null ||
-                stallSwitchHintRef.current
-              ) {
-                refreshHlsSnapshot(hls);
-              }
-            });
-
-            hls.on(Hls.Events.ERROR, function (_event: any, data: any) {
-              // 缓冲卡顿 / 跳过空洞：先 reload/recover/降档，再小幅 seek
-              if (
-                data?.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR ||
-                data?.details === Hls.ErrorDetails.BUFFER_SEEK_OVER_HOLE
-              ) {
+              },
+              onStall: (hls) => {
+                // 缓冲卡顿 / 跳过空洞：先 reload/recover/降档，再小幅 seek
                 const plan = planStallRecovery(stallRecoveryRef.current);
                 if (!plan.action) return;
                 try {
@@ -1773,16 +1528,15 @@ function PlayPageClient() {
                 }
                 markStallRecoveryUi(hls);
                 if (plan.showHint && availableSourcesRef.current.length > 1) {
+                  if (tryAutoSourceFailoverRef.current()) return;
                   setStallSwitchHint(true);
                   if (artPlayerRef.current) {
                     artPlayerRef.current.notice.show =
                       '播放多次卡顿，建议切换播放源';
                   }
                 }
-                return;
-              }
-
-              if (data.fatal) {
+              },
+              onFatal: (hls, data) => {
                 console.error('HLS Fatal Error:', data);
                 switch (data.type) {
                   case Hls.ErrorTypes.NETWORK_ERROR:
@@ -1795,7 +1549,7 @@ function PlayPageClient() {
                     hls.destroy();
                     break;
                 }
-              }
+              },
             });
           },
         },
@@ -2548,6 +2302,12 @@ function PlayPageClient() {
                     onDropLevel={handleDropPlaybackQuality}
                     onSwitchSource={handleOpenSourcesFromStall}
                     onRetry={handleRetryStallRecovery}
+                    autoFailoverEnabled={autoFailoverEnabled}
+                    onToggleAutoFailover={
+                      weakNetStatus === 'suggest-switch'
+                        ? handleToggleAutoFailover
+                        : undefined
+                    }
                     onDismiss={
                       weakNetStatus === 'suggest-switch'
                         ? () => setStallSwitchHint(false)

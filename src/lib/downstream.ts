@@ -1,4 +1,10 @@
 import { API_CONFIG, ApiSite, getConfig } from '@/lib/config';
+import {
+  isSourceDemoted,
+  parseVodJson,
+  recordSourceFailure,
+  recordSourceSuccess,
+} from '@/lib/sourceHealth';
 import { SearchResult } from '@/lib/types';
 import { cleanHtmlTags } from '@/lib/utils';
 
@@ -66,12 +72,28 @@ function mapApiItemToResult(
   };
 }
 
+type VodListPayload = {
+  list?: unknown;
+  pagecount?: number;
+};
+
+async function readVodPayload(
+  response: Response
+): Promise<VodListPayload | null> {
+  const data = parseVodJson(await response.text());
+  if (!data || Array.isArray(data)) return null;
+  return data as VodListPayload;
+}
+
 export async function searchFromApi(
   apiSite: ApiSite,
   query: string,
   options: SearchFromApiOptions = {}
 ): Promise<SearchResult[]> {
   const lite = options.lite === true;
+  if (isSourceDemoted(apiSite.key)) {
+    return [];
+  }
 
   try {
     const apiBaseUrl = apiSite.api;
@@ -91,16 +113,17 @@ export async function searchFromApi(
     clearTimeout(timeoutId);
 
     if (!response.ok) {
+      recordSourceFailure(apiSite.key);
       return [];
     }
 
-    const data = await response.json();
-    if (
-      !data ||
-      !data.list ||
-      !Array.isArray(data.list) ||
-      data.list.length === 0
-    ) {
+    const data = await readVodPayload(response);
+    if (!data || !data.list || !Array.isArray(data.list)) {
+      recordSourceFailure(apiSite.key);
+      return [];
+    }
+    recordSourceSuccess(apiSite.key);
+    if (data.list.length === 0) {
       return [];
     }
     // 处理第一页结果
@@ -178,6 +201,7 @@ export async function searchFromApi(
 
     return results;
   } catch (error) {
+    recordSourceFailure(apiSite.key);
     return [];
   }
 }
@@ -222,6 +246,10 @@ export async function getDetailFromApi(
   apiSite: ApiSite,
   id: string
 ): Promise<SearchResult> {
+  if (isSourceDemoted(apiSite.key)) {
+    throw new Error(`播放源暂时不可用: ${apiSite.name}`);
+  }
+
   if (apiSite.detail) {
     // 详情页可能被防爬拦截（如电影天堂返回 "Verify Yourself" 验证页），
     // 此时标准接口通常仍可用，回退过去而不是返回空剧集
@@ -247,18 +275,26 @@ async function fetchDetailFromStandardApi(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-  const response = await fetch(detailUrl, {
-    headers: API_CONFIG.detail.headers,
-    signal: controller.signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(detailUrl, {
+      headers: API_CONFIG.detail.headers,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeoutId);
+    recordSourceFailure(apiSite.key);
+    throw error;
+  }
 
   clearTimeout(timeoutId);
 
   if (!response.ok) {
+    recordSourceFailure(apiSite.key);
     throw new Error(`详情请求失败: ${response.status}`);
   }
 
-  const data = await response.json();
+  const data = await readVodPayload(response);
 
   if (
     !data ||
@@ -266,8 +302,11 @@ async function fetchDetailFromStandardApi(
     !Array.isArray(data.list) ||
     data.list.length === 0
   ) {
+    recordSourceFailure(apiSite.key);
     throw new Error('获取到的详情内容无效');
   }
+
+  recordSourceSuccess(apiSite.key);
 
   const videoDetail = data.list[0];
   let episodes = pickPlayableEpisodes(videoDetail.vod_play_url);

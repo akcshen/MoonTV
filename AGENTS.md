@@ -13,7 +13,7 @@ MoonTV is a single-service **Next.js 14 (App Router) + TypeScript + Tailwind** w
 ### Lint / test / build
 
 - Lint: `pnpm lint` (uses `next lint`). Also `pnpm typecheck` for TS.
-- Tests: `pnpm test` (jest). Note: there are currently **no test files**, so `jest` exits non-zero with "No tests found" — this is expected, not a failure.
+- Tests: `pnpm test` (jest). The suite includes playback, source-health, and preference tests and should pass.
 - Build (production): `pnpm build`. Dev is preferred for local work.
 
 ### Gotchas
@@ -22,5 +22,5 @@ MoonTV is a single-service **Next.js 14 (App Router) + TypeScript + Tailwind** w
 - Posters go through the built-in proxy at `/api/image-proxy` by default, so they render without any extra configuration. `NEXT_PUBLIC_IMAGE_PROXY` only overrides that prefix, and users can disable proxying entirely via the `enableImageProxy` localStorage flag. `NEXT_PUBLIC_DOUBAN_PROXY` is separate and only affects Douban list/category requests.
 - `pnpm install` ignores build scripts for `esbuild`, `sharp`, `unrs-resolver`, `workerd`. Dev, lint, and search work fine without approving them.
 - `config.json` (resource sites / categories) is read at startup via `scripts/convert-config.js` → `src/lib/runtime.ts`. Changing it requires a dev-server restart to regenerate.
-- Some resource sites in `config.json` are dead or anti-scraped (e.g. `wwzy` now serves an HTML page instead of JSON, and the `dyttzy` HTML detail page returns a "Verify Yourself" challenge). Aggregation code must tolerate non-JSON responses and empty results per source rather than assuming every configured site works.
+- Some resource sites in `config.json` are dead or anti-scraped. `wwzy`, `heimuer`, `wolong`, `mozhua`, and `xiaomaomi` are marked `disabled: true` (HTML, TLS reset, or DNS failure). `dyttzy` and `jisu` keep their JSON APIs but no longer set `detail`, because those HTML pages hit human verification / Cloudflare. Aggregation must still tolerate non-JSON responses: `src/lib/sourceHealth.ts` demotes a source for about 10 minutes after two consecutive failures so search does not wait out the per-source timeout.
 - The pre-commit hook regenerates `VERSION.txt` and `src/lib/version.ts`, so those two files conflict on almost every branch merge. Resolve by running `node scripts/generate-version.js` and then clearing the leftover conflict markers by hand — the script only rewrites the first `CURRENT_VERSION` occurrence.

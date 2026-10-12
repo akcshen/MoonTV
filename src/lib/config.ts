@@ -10,6 +10,12 @@ export interface ApiSite {
   api: string;
   name: string;
   detail?: string;
+  /** config.json 中标记的失效源，不参与搜索与详情 */
+  disabled?: boolean;
+}
+
+function isConfigSourceDisabled(site: { disabled?: boolean }): boolean {
+  return site.disabled === true;
 }
 
 interface ConfigFileStruct {
@@ -106,7 +112,7 @@ async function initConfig() {
             api: site.api,
             detail: site.detail,
             from: 'config',
-            disabled: false,
+            disabled: isConfigSourceDisabled(site),
           });
         });
 
@@ -214,7 +220,7 @@ async function initConfig() {
             api: site.api,
             detail: site.detail,
             from: 'config',
-            disabled: false,
+            disabled: isConfigSourceDisabled(site),
           })),
           CustomCategories: customCategories.map((category) => ({
             name: category.name,
@@ -262,7 +268,7 @@ async function initConfig() {
         api: site.api,
         detail: site.detail,
         from: 'config',
-        disabled: false,
+        disabled: isConfigSourceDisabled(site),
       })),
       CustomCategories:
         fileConfig.custom_category?.map((category) => ({
@@ -323,6 +329,10 @@ export async function getConfig(): Promise<AdminConfig> {
         existingSource.api = site.api;
         existingSource.detail = site.detail;
         existingSource.from = 'config';
+        // 文件里标失效的源保持禁用；管理员手动禁用的健康源不在这里打开
+        if (isConfigSourceDisabled(site)) {
+          existingSource.disabled = true;
+        }
       } else {
         // 如果不存在，创建新条目
         sourceConfigMap.set(key, {
@@ -331,7 +341,7 @@ export async function getConfig(): Promise<AdminConfig> {
           api: site.api,
           detail: site.detail,
           from: 'config',
-          disabled: false,
+          disabled: isConfigSourceDisabled(site),
         });
       }
     });
@@ -451,7 +461,7 @@ export async function resetConfig() {
       api: site.api,
       detail: site.detail,
       from: 'config',
-      disabled: false,
+      disabled: isConfigSourceDisabled(site),
     })),
     CustomCategories:
       storageType === 'redis'

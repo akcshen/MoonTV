@@ -3,13 +3,13 @@
   "api_site": {
     "dyttzy": {
       "api": "http://caiji.dyttzyapi.com/api.php/provide/vod",
-      "name": "电影天堂资源",
-      "detail": "http://caiji.dyttzyapi.com"
+      "name": "电影天堂资源"
     },
     "heimuer": {
       "api": "https://json.heimuer.xyz/api.php/provide/vod",
       "name": "黑木耳",
-      "detail": "https://heimuer.tv"
+      "detail": "https://heimuer.tv",
+      "disabled": true
     },
     "ruyi": {
       "api": "http://cj.rycjapi.com/api.php/provide/vod",
@@ -38,12 +38,12 @@
     },
     "wolong": {
       "api": "https://wolongzyw.com/api.php/provide/vod",
-      "name": "卧龙资源"
+      "name": "卧龙资源",
+      "disabled": true
     },
     "jisu": {
       "api": "https://jszyapi.com/api.php/provide/vod",
-      "name": "极速资源",
-      "detail": "https://jszyapi.com"
+      "name": "极速资源"
     },
     "dbzy": {
       "api": "https://dbzy.tv/api.php/provide/vod",
@@ -51,7 +51,8 @@
     },
     "mozhua": {
       "api": "https://mozhuazy.com/api.php/provide/vod",
-      "name": "魔爪资源"
+      "name": "魔爪资源",
+      "disabled": true
     },
     "mdzy": {
       "api": "https://www.mdzyapi.com/api.php/provide/vod",
@@ -71,7 +72,8 @@
     },
     "wwzy": {
       "api": "https://wwzy.tv/api.php/provide/vod",
-      "name": "旺旺短剧"
+      "name": "旺旺短剧",
+      "disabled": true
     },
     "ikun": {
       "api": "https://ikunzyapi.com/api.php/provide/vod",
@@ -83,7 +85,8 @@
     },
     "xiaomaomi": {
       "api": "https://zy.xmm.hk/api.php/provide/vod",
-      "name": "小猫咪资源"
+      "name": "小猫咪资源",
+      "disabled": true
     }
   }
 }

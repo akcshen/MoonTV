@@ -254,6 +254,25 @@ networks:
   - `api`：资源站提供的 `vod` JSON API 根地址。
   - `name`：在人机界面中展示的名称。
   - `detail`：（可选）部分无法通过 API 获取剧集详情的站点，需要提供网页详情根 URL，用于爬取。
+  - `disabled`：（可选）设为 `true` 时该源不参与搜索和详情。适合接口已失效、但仍想把地址留在配置里的站点。
+
+以下站点在一次轻量探测（每个源只请求一次 `?ac=list`，超时 7 秒）后被标为 `disabled: true`，原因如下。需要时把 `disabled` 去掉即可恢复：
+
+| key         | 名称       | 原因                                                        |
+| ----------- | ---------- | ----------------------------------------------------------- |
+| `wwzy`      | 旺旺短剧   | `wwzy.tv` 返回 HTML 页面，不再是 JSON 接口                  |
+| `heimuer`   | 黑木耳     | 接口返回 HTML 欢迎页，没有 `list`                           |
+| `wolong`    | 卧龙资源   | 接口返回 HTML，不是苹果 CMS JSON                            |
+| `mozhua`    | 魔爪资源   | HTTPS 在 TLS 握手阶段被重置；HTTP 返回脚本挑战页，不是 JSON |
+| `xiaomaomi` | 小猫咪资源 | `zy.xmm.hk` DNS 无法解析                                    |
+
+另外两处只去掉了网页 `detail`，JSON API 仍然启用：
+
+- `dyttzy`（电影天堂）：标准接口仍返回 JSON，但 `/index.php/vod/detail/...` 会落到 “Verify Yourself” 人机验证。播放地址改走标准接口里的 m3u8。
+- `jisu`（极速资源）：详情页是 Cloudflare “Just a moment...” 挑战，标准接口仍可用。
+
+搜索对单个源失败使用 `allSettled`。若某个仍启用的源连续两次返回非 JSON、HTTP 错误或超时，当前进程会把它降级约 10 分钟，这段时间内搜索和详情会直接跳过，避免反复等到 8 秒超时。进程重启后重新计数。
+
 - `custom_category`：自定义分类配置，用于在导航中添加个性化的影视分类。以 type + query 作为唯一标识。支持以下字段：
   - `name`：分类显示名称（可选，如不提供则使用 query 作为显示名）
   - `type`：分类类型，支持 `movie`（电影）或 `tv`（电视剧）

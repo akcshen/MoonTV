@@ -15,6 +15,9 @@ interface PlaybackNetworkStatusProps {
   onSwitchSource: () => void;
   onRetry: () => void;
   onDismiss?: () => void;
+  /** 仅在传入回调时显示。默认关闭，由设置或「建议换源」条打开。 */
+  autoFailoverEnabled?: boolean;
+  onToggleAutoFailover?: () => void;
 }
 
 function ActionButton({
@@ -58,13 +61,19 @@ const PlaybackNetworkStatus: React.FC<PlaybackNetworkStatusProps> = ({
   onSwitchSource,
   onRetry,
   onDismiss,
+  autoFailoverEnabled = false,
+  onToggleAutoFailover,
 }) => {
   const title = WEAK_NET_STATUS_LABEL[kind];
   const context = [levelLabel, bandwidthLabel ? `约 ${bandwidthLabel}` : null]
     .filter(Boolean)
     .join(' · ');
   const hint =
-    kind === 'suggest-switch' ? '当前源频繁卡顿，可降低画质或换源' : null;
+    kind === 'suggest-switch'
+      ? autoFailoverEnabled
+        ? '已开启自动换源；没有可接替的源时请手动换源'
+        : '当前源频繁卡顿，可降低画质或换源'
+      : null;
 
   return (
     <div
@@ -115,6 +124,14 @@ const PlaybackNetworkStatus: React.FC<PlaybackNetworkStatusProps> = ({
         <ActionButton onClick={onRetry} ariaLabel='按卡顿阶梯重试恢复'>
           重试恢复
         </ActionButton>
+        {onToggleAutoFailover ? (
+          <ActionButton
+            onClick={onToggleAutoFailover}
+            ariaLabel={autoFailoverEnabled ? '关闭自动换源' : '开启自动换源'}
+          >
+            {autoFailoverEnabled ? '关闭自动换源' : '开启自动换源'}
+          </ActionButton>
+        ) : null}
       </div>
     </div>
   );

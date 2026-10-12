@@ -8,6 +8,10 @@ import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
+import {
+  readAutoSourceFailoverEnabled,
+  writeAutoSourceFailoverEnabled,
+} from '@/lib/playbackPreferences';
 import { invalidateImageProxyCache } from '@/lib/utils';
 import { checkForUpdates, CURRENT_VERSION, UpdateStatus } from '@/lib/version';
 
@@ -30,6 +34,8 @@ export const UserMenu: React.FC = () => {
   const [doubanProxyUrl, setDoubanProxyUrl] = useState('');
   const [imageProxyUrl, setImageProxyUrl] = useState('');
   const [enableOptimization, setEnableOptimization] = useState(true);
+  const [enableAutoSourceFailover, setEnableAutoSourceFailover] =
+    useState(false);
   const [enableImageProxy, setEnableImageProxy] = useState(false);
   const [enableDoubanProxy, setEnableDoubanProxy] = useState(false);
 
@@ -107,6 +113,8 @@ export const UserMenu: React.FC = () => {
       if (savedEnableOptimization !== null) {
         setEnableOptimization(JSON.parse(savedEnableOptimization));
       }
+
+      setEnableAutoSourceFailover(readAutoSourceFailoverEnabled());
     }
   }, []);
 
@@ -248,6 +256,11 @@ export const UserMenu: React.FC = () => {
     }
   };
 
+  const handleAutoSourceFailoverToggle = (value: boolean) => {
+    setEnableAutoSourceFailover(value);
+    writeAutoSourceFailoverEnabled(value);
+  };
+
   const handleImageProxyToggle = (value: boolean) => {
     setEnableImageProxy(value);
     if (typeof window !== 'undefined') {
@@ -270,6 +283,7 @@ export const UserMenu: React.FC = () => {
 
     setDefaultAggregateSearch(true);
     setEnableOptimization(true);
+    setEnableAutoSourceFailover(false);
     setDoubanProxyUrl(defaultDoubanProxy);
     setEnableDoubanProxy(!!defaultDoubanProxy);
     setEnableImageProxy(!!defaultImageProxy);
@@ -278,6 +292,7 @@ export const UserMenu: React.FC = () => {
     if (typeof window !== 'undefined') {
       localStorage.setItem('defaultAggregateSearch', JSON.stringify(true));
       localStorage.setItem('enableOptimization', JSON.stringify(true));
+      writeAutoSourceFailoverEnabled(false);
       localStorage.setItem('doubanProxyUrl', defaultDoubanProxy);
       localStorage.setItem(
         'enableDoubanProxy',
@@ -510,6 +525,32 @@ export const UserMenu: React.FC = () => {
                   className='sr-only peer'
                   checked={enableOptimization}
                   onChange={(e) => handleOptimizationToggle(e.target.checked)}
+                />
+                <div className='w-11 h-6 bg-gray-300 rounded-full peer-checked:bg-green-500 transition-colors dark:bg-gray-600'></div>
+                <div className='absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5'></div>
+              </div>
+            </label>
+          </div>
+
+          {/* 自动换源，默认关闭 */}
+          <div className='flex items-center justify-between'>
+            <div>
+              <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+                卡顿时自动换源
+              </h4>
+              <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                默认关闭。连续多次卡顿并出现「建议换源」时，自动切换到下一个已测速或列表中的播放源，并尽量保持当前集进度
+              </p>
+            </div>
+            <label className='flex items-center cursor-pointer'>
+              <div className='relative'>
+                <input
+                  type='checkbox'
+                  className='sr-only peer'
+                  checked={enableAutoSourceFailover}
+                  onChange={(e) =>
+                    handleAutoSourceFailoverToggle(e.target.checked)
+                  }
                 />
                 <div className='w-11 h-6 bg-gray-300 rounded-full peer-checked:bg-green-500 transition-colors dark:bg-gray-600'></div>
                 <div className='absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5'></div>

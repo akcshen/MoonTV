@@ -59,4 +59,21 @@ describe('PlaybackNetworkStatus', () => {
     fireEvent.click(screen.getByRole('button', { name: '关闭弱网提示' }));
     expect(handlers.onDismiss).toHaveBeenCalledTimes(1);
   });
+
+  it('offers auto failover only when the suggest-switch bar asks for it', () => {
+    const onToggleAutoFailover = jest.fn();
+    render(
+      <PlaybackNetworkStatus
+        kind='suggest-switch'
+        canDropLevel={false}
+        canSwitchSource
+        autoFailoverEnabled={false}
+        onToggleAutoFailover={onToggleAutoFailover}
+        {...handlers}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '开启自动换源' }));
+    expect(onToggleAutoFailover).toHaveBeenCalledTimes(1);
+  });
 });

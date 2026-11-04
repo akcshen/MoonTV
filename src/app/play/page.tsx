@@ -40,6 +40,7 @@ import {
   STALL_RECOVERING_HOLD_MS,
 } from '@/lib/hlsPlayback';
 import { loadVideoDownload } from '@/lib/lazyVideoDownload';
+import { keepPlayingOnVideoClick } from '@/lib/playbackClick';
 import {
   AUTO_SOURCE_FAILOVER_EVENT,
   readAutoSourceFailoverEnabled,
@@ -1705,6 +1706,9 @@ function PlayPageClient() {
           },
         ],
       });
+
+      // 单击画面只显示控制栏，不暂停。播放按钮和空格键仍然可以暂停。
+      keepPlayingOnVideoClick(artPlayerRef.current);
 
       // 监听播放器事件
       artPlayerRef.current.on('ready', () => {

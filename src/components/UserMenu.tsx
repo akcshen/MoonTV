@@ -9,8 +9,12 @@ import { createPortal } from 'react-dom';
 
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
 import {
+  DEFAULT_PLAYBACK_RATE,
+  DEFAULT_PLAYBACK_VOLUME,
   readAutoSourceFailoverEnabled,
   writeAutoSourceFailoverEnabled,
+  writePlaybackRate,
+  writePlaybackVolume,
 } from '@/lib/playbackPreferences';
 import { invalidateImageProxyCache } from '@/lib/utils';
 import { checkForUpdates, CURRENT_VERSION, UpdateStatus } from '@/lib/version';
@@ -293,6 +297,8 @@ export const UserMenu: React.FC = () => {
       localStorage.setItem('defaultAggregateSearch', JSON.stringify(true));
       localStorage.setItem('enableOptimization', JSON.stringify(true));
       writeAutoSourceFailoverEnabled(false);
+      writePlaybackVolume(DEFAULT_PLAYBACK_VOLUME);
+      writePlaybackRate(DEFAULT_PLAYBACK_RATE);
       localStorage.setItem('doubanProxyUrl', defaultDoubanProxy);
       localStorage.setItem(
         'enableDoubanProxy',
